@@ -56,7 +56,7 @@ class FilesTab(ctk.CTkFrame):
         out_card = Card(outer, "Outgoing transfer")
         out_card.pack(fill="x", pady=4)
         row1 = ctk.CTkFrame(out_card, fg_color="transparent")
-        row1.pack(fill="x", padx=12, pady=(6, 2))
+        row1.pack(fill="x", padx=12, pady=(6, 12))
         self.pick_btn = ctk.CTkButton(row1, text="Choose file…", width=120,
                                       command=self._pick)
         self.pick_btn.pack(side="left")
@@ -77,7 +77,7 @@ class FilesTab(ctk.CTkFrame):
         self.progress.set(0)
         self.progress.pack(side="left", fill="x", expand=True, padx=(10, 0))
 
-        self.tx_status = ctk.CTkLabel(out_card, text="", font=FONTS["small"],
+        self.tx_status = ctk.CTkLabel(out_card, text="Waiting…", font=FONTS["small"],
                                       text_color=FG_DIM, anchor="w")
         self.tx_status.pack(fill="x", padx=12, pady=(0, 8))
 
