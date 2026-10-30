@@ -8,11 +8,9 @@ import re
 import customtkinter as ctk
 
 from ..constants import (
-    CODE_RATES,
     COL_WARN,
     FRAME_SIZE_NAMES,
     MFSK_MODE_NAMES,
-    OFDM_MODULATIONS,
     ROBUST_MODE_NAMES,
 )
 from .theme import BG, FG, FG_DIM, FONTS
@@ -20,13 +18,27 @@ from .widgets import Card
 
 CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{1,9}$")
 
-MODULATION_OPTIONS = [(m, m) for m in OFDM_MODULATIONS]
-CODE_RATE_OPTIONS = [(r, r) for r in CODE_RATES]
-FRAME_SIZE_OPTIONS = [(FRAME_SIZE_NAMES[i], str(i)) for i in (0, 1, 2)]
-MFSK_OPTIONS = [(name, str(i)) for i, name in enumerate(MFSK_MODE_NAMES)]
-ROBUST_OPTIONS = [(name, str(i)) for i, name in enumerate(ROBUST_MODE_NAMES)]
 BAND_OPTIONS = [("HF", "0"), ("VHF/UHF", "1")]
-MODEM_TYPES = ["OFDM", "MFSK", "ROBUST"]
+
+MODES_GUIDE = """OFDM — fastest family (~0.8-13 kbit/s in the same 2400 Hz).
+For clean channels: VHF/UHF FM, line-of-sight. Practical picks: QPSK or
+8PSK at rate 3/4 or 5/6, normal or long frames. QAM256+ needs a
+near-perfect channel and rarely works.
+
+ROBUST (RDM) — slowest, toughest; built for fading HF paths (40/80 m
+NVIS). From ~1150 bps (RDM-1200) down to ~150 bps (RDMN-150).
+"N" = narrow 600 Hz variant, "S" = short frames (170 B payload vs 510 B).
+
+MFSK — non-coherent weak-signal / backup mode; fixed ~4.4 s frames,
+tolerant of poor sync. MFSK-16 is the common all-rounder.
+
+Code rate: the first number is the share of what's transmitted that
+carries data. 5/6 means ~83% data, the remaining 1/6 is FEC; 1/2 means
+half the airtime is error correction (reliable, half speed).
+
+File FEC (Files tab, L1-L4) is extra Reed-Solomon parity on top of the
+code rate; e.g. L2 adds ~20% airtime and repairs roughly 1 lost packet
+in 6."""
 
 
 class Field:
@@ -111,17 +123,7 @@ class Field:
 
 GROUP_SPEC = [
     ("Station", [("callsign", "Callsign", "entry", "callsign")]),
-    (
-        "Modem",
-        [
-            ("modulation", "Modulation", "option", MODULATION_OPTIONS),
-            ("code_rate", "Code rate", "option", CODE_RATE_OPTIONS),
-            ("frame_size", "Frame size", "option", FRAME_SIZE_OPTIONS),
-            ("postamble", "Postamble (OFDM)", "switch", None),
-            ("mfsk_mode", "MFSK mode", "option", MFSK_OPTIONS),
-            ("robust_mode", "ROBUST mode", "option", ROBUST_OPTIONS),
-        ],
-    ),
+    ("Modem", None),  # read-only view; edited from Chat/Files rows on Send
     (
         "CSMA",
         [
@@ -145,6 +147,7 @@ GROUP_SPEC = [
         "TX",
         [
             ("tx_drive", "TX drive %", "entry", ("int", 5, 100)),
+            ("postamble", "Postamble (OFDM)", "switch", None),
             ("tx_blanking_enabled", "TX blanking", "switch", None),
             ("fragmentation_enabled", "Fragmentation", "switch", None),
         ],
@@ -168,15 +171,13 @@ READONLY_FIELDS = [
     ("short_frame", "Short frame (derived)"),
 ]
 
-NUMERIC_OPTION_FIELDS = {"frame_size", "mfsk_mode", "robust_mode", "csma_band"}
+NUMERIC_OPTION_FIELDS = {"csma_band"}
 
-GROUP_FOR_MODE = {
-    "modulation": 0,
-    "code_rate": 0,
-    "frame_size": 0,
-    "postamble": 0,
-    "mfsk_mode": 1,
-    "robust_mode": 2,
+# which modem read-only rows belong to which modem type
+_MODEM_VIEW_ROWS = {
+    0: ("modulation", "code_rate", "frame_size"),
+    1: ("mfsk_mode",),
+    2: ("robust_mode",),
 }
 
 
@@ -196,22 +197,24 @@ class SettingsTab(ctk.CTkFrame):
             scroll, text="", font=FONTS["body"], text_color=COL_WARN, anchor="w"
         )
 
-        # ---- modem type + station ----
+        # ---- modes guide ----
+        guide_card = Card(scroll, "Modem modes guide")
+        guide_card.pack(fill="x", pady=3)
+        guide = ctk.CTkTextbox(
+            guide_card, font=FONTS["mono_small"], fg_color="#14171d",
+            text_color=FG, height=260, wrap="word",
+        )
+        guide.pack(fill="x", padx=12, pady=6)
+        guide.insert("1.0", MODES_GUIDE)
+        guide.configure(state="disabled")
+
+        # ---- grouped editors ----
         for group_title, fields in GROUP_SPEC:
             card = Card(scroll, group_title)
             card.pack(fill="x", pady=3)
-            if group_title == "Modem":
-                seg_row = ctk.CTkFrame(card, fg_color="transparent")
-                seg_row.pack(fill="x", padx=12, pady=(6, 2))
-                ctk.CTkLabel(
-                    seg_row, text="Modem type", font=FONTS["body"], text_color=FG
-                ).pack(side="left")
-                self.modem_seg = ctk.CTkSegmentedButton(
-                    seg_row,
-                    values=MODEM_TYPES,
-                    command=self._on_modem_type,
-                )
-                self.modem_seg.pack(side="right")
+            if fields is None:
+                self._build_modem_view(card)
+                continue
             for name, label, kind, spec in fields:
                 field = Field(card, name, label, kind, spec)
                 field.pack(fill="x", padx=12, pady=1)
@@ -280,10 +283,7 @@ class SettingsTab(ctk.CTkFrame):
             for name, field in self.fields.items():
                 if name in config:
                     field.set_config_value(config[name])
-            mtype = config.get("modem_type")
-            if mtype in (0, 1, 2):
-                self.modem_seg.set(MODEM_TYPES[int(mtype)])
-            self._apply_mode_visibility()
+            self._update_modem_view(config)
             for name, label in self.readonly_labels.items():
                 value = config.get(name, "—")
                 label.configure(text=str(value))
@@ -307,11 +307,7 @@ class SettingsTab(ctk.CTkFrame):
         """Changed fields (config representation) and validation errors."""
         fields: dict = {}
         errors: list[str] = []
-        want_modem = MODEM_TYPES.index(self.modem_seg.get())
         for name, field in self.fields.items():
-            mode = GROUP_FOR_MODE.get(name)
-            if mode is not None and mode != want_modem:
-                continue
             if name == "tx_drive":
                 text = field.widget.get().strip()
                 try:
@@ -331,7 +327,6 @@ class SettingsTab(ctk.CTkFrame):
                 fields[name] = value
             except ValueError as exc:
                 errors.append(str(exc))
-        fields["modem_type"] = want_modem
         return fields, errors
 
     def changed_fields(self) -> tuple[dict, list[str]]:
@@ -396,20 +391,56 @@ class SettingsTab(ctk.CTkFrame):
         state = "normal" if enabled else "disabled"
         self.apply_btn.configure(state=state)
 
-    # -- modem type visibility --------------------------------------------------
+    # -- modem read-only view ---------------------------------------------------
 
-    def _on_modem_type(self, _value) -> None:
-        self._apply_mode_visibility()
+    def _build_modem_view(self, card) -> None:
+        self.modem_rows: dict[str, tuple[ctk.CTkFrame, ctk.CTkLabel]] = {}
+        for name, label in (
+            ("modulation", "Modulation"),
+            ("code_rate", "Code rate"),
+            ("frame_size", "Frame size"),
+            ("mfsk_mode", "MFSK mode"),
+            ("robust_mode", "ROBUST mode"),
+        ):
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            ctk.CTkLabel(row, text=label, font=FONTS["body"], text_color=FG).pack(
+                side="left"
+            )
+            value = ctk.CTkLabel(
+                row, text="—", font=FONTS["mono_small"], text_color=FG_DIM
+            )
+            value.pack(side="right")
+            self.modem_rows[name] = (row, value)
+        ctk.CTkLabel(
+            card,
+            text="Change broadcast mode from the Chat or Files tab; it "
+            "applies when you press Send.",
+            font=FONTS["small"],
+            text_color=FG_DIM,
+            anchor="w",
+        ).pack(fill="x", padx=12, pady=(2, 6))
 
-    def _apply_mode_visibility(self) -> None:
+    def _update_modem_view(self, config: dict) -> None:
+        def named(table, key):
+            try:
+                return table[int(config[key])]
+            except (KeyError, IndexError, TypeError, ValueError):
+                return "—"
+
+        texts = {
+            "modulation": str(config.get("modulation") or "—"),
+            "code_rate": str(config.get("code_rate") or "—"),
+            "frame_size": named(FRAME_SIZE_NAMES, "frame_size"),
+            "mfsk_mode": named(MFSK_MODE_NAMES, "mfsk_mode"),
+            "robust_mode": named(ROBUST_MODE_NAMES, "robust_mode"),
+        }
         try:
-            want = MODEM_TYPES.index(self.modem_seg.get())
-        except ValueError:
-            return
-        for name, mode in GROUP_FOR_MODE.items():
-            field = self.fields[name]
-            widget = field._row or field.widget
-            if mode == want:
-                widget.pack(fill="x", padx=12, pady=1)
+            show = _MODEM_VIEW_ROWS[int(config.get("modem_type"))]
+        except (KeyError, TypeError, ValueError):
+            show = ()
+        for name, (row, value) in self.modem_rows.items():
+            value.configure(text=texts[name])
+            if name in show:
+                row.pack(fill="x", padx=12, pady=1)
             else:
-                widget.pack_forget()
+                row.pack_forget()

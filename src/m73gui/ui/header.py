@@ -5,7 +5,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from ..constants import COL_OFF, COL_IDLE
-from .theme import FG, FG_DIM, FONTS, state_color
+from .theme import FG_DIM, FONTS, state_color
 from .widgets import StatusChip
 
 
@@ -23,12 +23,6 @@ class Header(ctk.CTkFrame):
         )
         self.callsign = StatusChip(left, "?", COL_IDLE)
         self.callsign.pack(side="left", padx=(8, 0))
-        self.mode = StatusChip(left, "—", "#9aa4b2")
-        self.mode.pack(side="left", padx=(6, 0))
-        self.payload = ctk.CTkLabel(
-            left, text="payload —", font=FONTS["small"], text_color=FG_DIM
-        )
-        self.payload.pack(side="left", padx=(8, 0))
 
         conn = ctk.CTkFrame(self, fg_color="transparent")
         conn.grid(row=0, column=1, sticky="w", padx=12)
@@ -72,9 +66,6 @@ class Header(ctk.CTkFrame):
 
     def update(self, state) -> None:
         self.callsign.set(state.callsign, COL_IDLE if state.control_connected else COL_OFF)
-        self.mode.set(state.mode_label(), "#9aa4b2")
-        ps = state.payload_size
-        self.payload.configure(text=f"payload {ps} B" if ps else "payload —")
 
         self.ctrl_chip.set(
             "Control ●" if state.control_connected else "Control ○",
