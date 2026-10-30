@@ -38,7 +38,7 @@ class ChannelTab(ctk.CTkFrame):
 
         # ---- link quality ----
         link = Card(scroll, "Link quality")
-        link.pack(fill="x", pady=3)
+        link.pack(fill="x", pady=(0, 3))
         self._link_labels = {}
         for key, label in [
             ("last_snr", "Last SNR"),

@@ -181,7 +181,7 @@ class SettingsTab(ctk.CTkFrame):
         self._loading = False
 
         scroll = ctk.CTkScrollableFrame(self, fg_color=BG)
-        scroll.pack(fill="both", expand=True, padx=6, pady=4)
+        scroll.pack(fill="both", expand=True, padx=6, pady=(6, 4))
 
         self.banner = ctk.CTkLabel(
             scroll, text="", font=FONTS["body"], text_color=COL_WARN, anchor="w"
@@ -189,7 +189,7 @@ class SettingsTab(ctk.CTkFrame):
 
         # ---- modes guide ----
         guide_card = Card(scroll, "Modem modes guide")
-        guide_card.pack(fill="x", pady=3)
+        guide_card.pack(fill="x", pady=(0, 3))
         guide = ctk.CTkTextbox(
             guide_card, font=FONTS["body"], fg_color="#14171d",
             text_color=FG, height=300, wrap="word",

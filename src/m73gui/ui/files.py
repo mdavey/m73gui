@@ -35,7 +35,7 @@ class FilesTab(ctk.CTkFrame):
 
         # ---- tx settings (mode + file FEC, apply on Send) ----
         mode_card = Card(outer, "Tx Settings")
-        mode_card.pack(fill="x", pady=4)
+        mode_card.pack(fill="x", pady=(0, 4))
         self.mode_row = ModeRow(mode_card, on_change=self._mode_changed,
                                 label="")
         self.mode_row.pack(fill="x", padx=12, pady=8)
