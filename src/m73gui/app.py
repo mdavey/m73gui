@@ -638,7 +638,12 @@ def run(
             "run it on a machine with X11/Wayland access.",
         )
         return 2
+    # build the whole UI unmapped: a visible window would flicker for the
+    # ~200 ms it takes Tk to create and lay out every tab
+    root.withdraw()
     app = App(root, control, kiss)
+    root.update_idletasks()  # finish layout while still hidden
+    root.deiconify()
     try:
         root.mainloop()
     except KeyboardInterrupt:
