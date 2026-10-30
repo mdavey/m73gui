@@ -1,8 +1,8 @@
 # m73gui
 
 A desktop GUI for [modem73](https://github.com/RFnexus/modem73) — the amateur-radio
-OFDM/MFSK/RDM data modem. modem73 is a capable but headless TNC: it gives you a
-control port, a KISS port, and a log. m73gui turns that into a proper application —
+OFDM/MFSK/RDM data modem. modem73 is primarily just that: a modem, driven through a
+control port, a KISS port, and a log. m73gui puts a friendly front end on it —
 chat, file broadcasting, a live look at what's on the channel, and an editor for the
 modem's settings.
 
