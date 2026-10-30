@@ -520,8 +520,7 @@ class IncomingFiles:
         if transfer.status == INCOMING_INCOMPLETE and not transfer.finalized:
             transfer.status = INCOMING_ACTIVE  # late chunks revive a timed-out offer
             transfer.message = "resumed"
-        if transfer.received % 16 == 0 or transfer.received == transfer.start.total_chunks:
-            self._update(transfer)
+        self._update(transfer)
         if transfer.received == transfer.start.total_chunks:
             self._finalize(transfer)
 

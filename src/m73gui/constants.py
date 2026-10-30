@@ -52,8 +52,10 @@ CHAT_PARTIAL_REVEAL_S = 10.0
 
 # File sender pacing
 PACING_POLL_S = 0.15
-PACING_HIGH_WATER = 10
-PACING_LOW_WATER = 3
+# keep at most one extra frame queued beyond the one being sent: deep queues
+# make cancel take minutes and hog the channel
+PACING_HIGH_WATER = 2
+PACING_LOW_WATER = 1
 
 # UI caps
 PACKET_TABLE_MAX_ROWS = 1000

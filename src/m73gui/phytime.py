@@ -8,8 +8,13 @@ are not modelled beyond a flat per-chunk slack.
 
 from __future__ import annotations
 
-# per-chunk sender pacing / CSMA slack in seconds
-CHUNK_OVERHEAD_S = 0.5
+# per-frame sender pacing / CSMA / PTT-gap slack in seconds (measured on a
+# real link: ~0.6 s between consecutive frames beyond pure airtime)
+CHUNK_OVERHEAD_S = 0.6
+
+# FILE_START and FILE_END are each broadcast twice, so every transfer pays
+# for 4 extra frames regardless of file size
+CONTROL_FRAMES = 4
 
 # used when the mode is unrecognised (same fallback modem73 uses)
 _DEFAULT_FRAME_S = 3.0
@@ -77,7 +82,8 @@ def estimate_transfer_seconds(config: dict, chunks: int) -> float:
     """Estimated total airtime for a broadcast of *chunks* full chunks."""
     if chunks <= 0:
         return 0.0
-    return chunks * (frame_seconds(config) + CHUNK_OVERHEAD_S)
+    frames = chunks + CONTROL_FRAMES
+    return frames * (frame_seconds(config) + CHUNK_OVERHEAD_S)
 
 
 def human_duration(seconds: float) -> str:

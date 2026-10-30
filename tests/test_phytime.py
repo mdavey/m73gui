@@ -74,7 +74,8 @@ class EstimateTest(unittest.TestCase):
         }
         per = phytime.frame_seconds(cfg) + phytime.CHUNK_OVERHEAD_S
         self.assertAlmostEqual(
-            phytime.estimate_transfer_seconds(cfg, 10), 10 * per
+            phytime.estimate_transfer_seconds(cfg, 10),
+            (10 + phytime.CONTROL_FRAMES) * per,
         )
 
     def test_zero_chunks(self):
