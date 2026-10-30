@@ -135,6 +135,14 @@ class FilesTab(ctk.CTkFrame):
             text += f"  ·  {chunks} chunks × {chunk} B"
         self.file_label.configure(text=text)
 
+    def clear_selection(self) -> None:
+        """Forget the picked file and its chunk math (e.g. after a mode change
+        altered the frame size)."""
+        self.selected_path = None
+        self.file_label.configure(text="no file selected")
+        self.progress.set(0)
+        self.tx_status.configure(text="", text_color=FG_DIM)
+
     def _send(self) -> None:
         if not self.selected_path:
             self.app.notify("Pick a file first", level="warn")

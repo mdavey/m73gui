@@ -221,6 +221,8 @@ class App:
             self.settings_tab.on_apply_result(False, f"apply failed: {error}")
         else:
             self.settings_tab.on_apply_result(True, str(value))
+            # frame sizes may have changed; stale chunk info is misleading
+            self.files_tab.clear_selection()
 
     def refresh_settings(self) -> None:
         def work():
