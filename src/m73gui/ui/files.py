@@ -37,12 +37,6 @@ class FilesTab(ctk.CTkFrame):
         )
         self.file_label.pack(side="left", padx=10)
 
-        self.robust_var = ctk.BooleanVar(value=False)
-        self.robust_check = ctk.CTkCheckBox(
-            row1, text="Robust announce (experimental)", variable=self.robust_var
-        )
-        self.robust_check.pack(side="left", padx=10)
-
         ctk.CTkLabel(
             out_card,
             text="Best-effort broadcast: no delivery confirmation. Large files take "
@@ -107,15 +101,10 @@ class FilesTab(ctk.CTkFrame):
         set_card.pack(fill="x", pady=4)
         grow = ctk.CTkFrame(set_card, fg_color="transparent")
         grow.pack(fill="x", padx=12, pady=8)
-        self.apply_announced = ctk.CTkCheckBox(
-            grow, text="Apply announced modem settings"
-        )
-        self.apply_announced.select()
-        self.apply_announced.pack(side="left")
         self.accept_self = ctk.CTkCheckBox(
             grow, text="Accept my own echoed transfers (loopback test)"
         )
-        self.accept_self.pack(side="left", padx=16)
+        self.accept_self.pack(side="left")
         self.dir_label = ctk.CTkLabel(
             set_card,
             text=f"downloads: {app.downloads_dir}",
@@ -150,7 +139,7 @@ class FilesTab(ctk.CTkFrame):
         if not self.selected_path:
             self.app.notify("Pick a file first", level="warn")
             return
-        err = self.app.send_file(self.selected_path, self.robust_var.get())
+        err = self.app.send_file(self.selected_path)
         if err:
             self.app.notify(err, level="error")
 
@@ -174,7 +163,6 @@ class FilesTab(ctk.CTkFrame):
         busy = snap.status not in (TX_SENT, TX_FAILED, TX_CANCELLED)
         self.send_btn.configure(state="disabled" if busy else "normal")
         self.pick_btn.configure(state="disabled" if busy else "normal")
-        self.robust_check.configure(state="disabled" if busy else "normal")
         self.cancel_btn.configure(state="normal" if busy else "disabled")
 
     def set_transfer_blocked(self, blocked: bool) -> None:

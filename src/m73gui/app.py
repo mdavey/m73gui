@@ -46,9 +46,6 @@ from . import __version__
 
 log = logging.getLogger("m73gui.app")
 
-APPLY_DEFER_TIMEOUT_S = 20.0
-
-
 class App:
     def __init__(
         self,
@@ -78,7 +75,6 @@ class App:
             send_frame=self._send_payload,
             get_status=self._sender_status,
             get_config=self._sender_config,
-            set_config=self._sender_set_config,
             outgoing_ids=self.outgoing_ids,
         )
         self.incoming = IncomingFiles(
@@ -86,8 +82,6 @@ class App:
             emit=lambda kind, **d: self.events.put((kind, d)),
             outgoing_ids=self.outgoing_ids,
             accept_self=lambda: bool(self.files_tab.accept_self.get()),
-            apply_announced=lambda: bool(self.files_tab.apply_announced.get()),
-            apply_settings=self._request_apply_announced,
         )
 
         # rx metadata <-> payload correlation
@@ -100,7 +94,6 @@ class App:
         self.chat_asm = protocol.ChatReassembler(
             CHAT_PARTIAL_REVEAL_S, now_fn=self._chat_clock
         )
-        self._pending_apply: tuple[dict, str, float] | None = None
 
         self._build_ui()
 
@@ -198,12 +191,12 @@ class App:
         else:
             self.notify(f"queued {len(frames)} chat part(s) for broadcast")
 
-    def send_file(self, path: str, robust_announce: bool) -> str | None:
+    def send_file(self, path: str) -> str | None:
         if not self.kiss.connected:
             return "KISS link is down; cannot transfer files"
         if not self.control.connected:
             return "control link is down; pacing and settings are unavailable"
-        return self.sender.start(path, robust_announce)
+        return self.sender.start(path)
 
     def cancel_file(self) -> None:
         self.sender.cancel()
@@ -289,49 +282,6 @@ class App:
         except ControlError:
             return None
 
-    def _sender_set_config(self, fields: dict) -> bool:
-        try:
-            self.control.set_config(fields)
-            return True
-        except ControlError:
-            return False
-
-    # ------------------------------------------------- announced settings
-
-    def _request_apply_announced(self, fields: dict, label: str) -> None:
-        self._pending_apply = (fields, label, time.monotonic() + APPLY_DEFER_TIMEOUT_S)
-        self.notify(f"peer requests mode {label}; waiting for idle channel")
-
-    def _try_apply_pending(self) -> None:
-        if self._pending_apply is None:
-            return
-        fields, label, deadline = self._pending_apply
-        status = self.state.status or {}
-        busy = (
-            status.get("channel_state") == "tx"
-            or int(status.get("tx_queue", 0) or 0) > 0
-        )
-        if self.sender.busy():
-            busy = True
-        if not busy and self.control.connected:
-            self._pending_apply = None
-
-            def work() -> None:
-                self.control.set_config(fields)
-
-            def done(value, error) -> None:
-                if error:
-                    self.notify(f"peer mode {label}: apply failed: {error}",
-                                level="error")
-                else:
-                    self.notify(f"peer requested mode: {label} — applied")
-
-            self.run_async(work, done)
-        elif time.monotonic() > deadline:
-            self._pending_apply = None
-            self.notify(f"peer requested mode {label}: channel stayed busy",
-                        level="warn")
-
     # ------------------------------------------------------------ event pump
 
     def _pump(self) -> None:
@@ -362,7 +312,6 @@ class App:
             self.chat_tab.add_line(f"[{stamp}] {line}")
         self.incoming.sweep()
         self._publish_stale_meta()
-        self._try_apply_pending()
 
     def _dispatch(self, kind: str, data: dict) -> None:
         if kind == "ctrl_connected":

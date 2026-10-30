@@ -1,4 +1,4 @@
-"""Outgoing file sender, incoming reassembler, and robust-mode announcement.
+"""Outgoing file sender and incoming reassembler.
 
 All logic is transport-agnostic: the sender takes callables for frame sending,
 status/config access, sleeping, and clock, so the full sequence can be unit
@@ -18,14 +18,10 @@ from typing import Callable
 
 from .. import protocol
 from ..constants import (
-    ANNOUNCE_DRAIN_TIMEOUT_S,
-    ANNOUNCE_QUIET_TIMEOUT_S,
-    ANNOUNCE_ROBUST_MODE,
     CODE_RATES,
     FILE_MAX_BYTES,
     FILE_MAX_CHUNKS,
     FLAG_POSTAMBLE,
-    FLAG_ROBUST_ANNOUNCED,
     FRAME_SIZE_NAMES,
     INCOMING_IDLE_TIMEOUT_S,
     MFSK_MODE_NAMES,
@@ -34,6 +30,7 @@ from ..constants import (
     PACING_LOW_WATER,
     PACING_POLL_S,
     ROBUST_MODE_NAMES,
+    TX_DRAIN_TIMEOUT_S,
 )
 from ..state import (
     TX,
@@ -66,41 +63,23 @@ def target_settings(config: dict) -> dict:
     return {k: config[k] for k in MODEM_SETTING_FIELDS if k in config}
 
 
-def announced_settings_to_fields(fs: protocol.FileStart) -> dict | None:
-    """Translate FILE_START modem fields into set_config fields, or None when
-    out of range."""
+def settings_in_range(fs: protocol.FileStart) -> str | None:
+    """Error string when FILE_START modem field indexes are out of range."""
     if fs.modem_type not in (0, 1, 2):
-        return None
-    fields: dict = {"modem_type": fs.modem_type}
+        return "invalid modem_type"
     if fs.modem_type == 0:
-        if fs.modulation >= len(OFDM_MODULATIONS) or fs.code_rate >= len(CODE_RATES):
-            return None
-        fields["modulation"] = OFDM_MODULATIONS[fs.modulation]
-        fields["code_rate"] = CODE_RATES[fs.code_rate]
-        fields["frame_size"] = FRAME_SIZE_NAMES.get(fs.frame_size)
-        if fields["frame_size"] is None:
-            return None
+        if (
+            fs.modulation >= len(OFDM_MODULATIONS)
+            or fs.code_rate >= len(CODE_RATES)
+            or fs.frame_size >= len(FRAME_SIZE_NAMES)
+        ):
+            return "invalid OFDM settings"
     elif fs.modem_type == 1:
         if fs.mfsk_mode >= len(MFSK_MODE_NAMES):
-            return None
-        fields["mfsk_mode"] = fs.mfsk_mode
-    else:
-        if fs.robust_mode >= len(ROBUST_MODE_NAMES):
-            return None
-        fields["robust_mode"] = fs.robust_mode
-    return fields
-
-
-def announced_mode_label(fs: protocol.FileStart) -> str:
-    if fs.modem_type == 0:
-        mod = OFDM_MODULATIONS[fs.modulation] if fs.modulation < len(OFDM_MODULATIONS) else "?"
-        rate = CODE_RATES[fs.code_rate] if fs.code_rate < len(CODE_RATES) else "?"
-        return f"OFDM {mod} {rate} {FRAME_SIZE_NAMES.get(fs.frame_size, '?')}"
-    if fs.modem_type == 1:
-        m = MFSK_MODE_NAMES[fs.mfsk_mode] if fs.mfsk_mode < len(MFSK_MODE_NAMES) else "?"
-        return f"MFSK {m}"
-    m = ROBUST_MODE_NAMES[fs.robust_mode] if fs.robust_mode < len(ROBUST_MODE_NAMES) else "?"
-    return f"ROBUST {m}"
+            return "invalid MFSK mode"
+    elif fs.robust_mode >= len(ROBUST_MODE_NAMES):
+        return "invalid ROBUST mode"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +95,6 @@ class FileSender:
         send_frame: Callable[[bytes], bool],
         get_status: Callable[[], dict | None],
         get_config: Callable[[], dict | None],
-        set_config: Callable[[dict], bool],
         outgoing_ids: set[int],
         sleep: Callable[[float], bool] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -125,12 +103,10 @@ class FileSender:
         self.send_frame = send_frame
         self.get_status = get_status
         self.get_config = get_config
-        self.set_config = set_config
         self.outgoing_ids = outgoing_ids
         self.sleep = sleep  # returns True if aborted during sleep
         self.monotonic = monotonic
-        self.quiet_timeout = ANNOUNCE_QUIET_TIMEOUT_S
-        self.drain_timeout = ANNOUNCE_DRAIN_TIMEOUT_S
+        self.drain_timeout = TX_DRAIN_TIMEOUT_S
         self.snapshot: OutgoingSnapshot | None = None
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
@@ -141,7 +117,7 @@ class FileSender:
     def busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, path: str, robust_announce: bool) -> str | None:
+    def start(self, path: str) -> str | None:
         """Begin transfer; returns an error string or None."""
         if self.busy():
             return "a transfer is already running"
@@ -161,7 +137,7 @@ class FileSender:
         self._cancel.clear()
         self._abort.clear()
         self._thread = threading.Thread(
-            target=self._guarded_run, args=(path, robust_announce), daemon=True
+            target=self._guarded_run, args=(path,), daemon=True
         )
         self._thread.start()
         return None
@@ -176,9 +152,9 @@ class FileSender:
 
     # -- internals ------------------------------------------------------------
 
-    def _guarded_run(self, path: str, robust_announce: bool) -> None:
+    def _guarded_run(self, path: str) -> None:
         try:
-            self._run(path, robust_announce)
+            self._run(path)
         except Exception:  # never let a worker kill the app
             log.exception("file sender crashed")
             self._finish(TX_FAILED, "internal error, see log")
@@ -253,101 +229,7 @@ class FileSender:
                 return False
         return True
 
-    def _announce(
-        self,
-        transfer_id: int,
-        name: str,
-        size: int,
-        chunk_size: int,
-        total_chunks: int,
-        sha256: bytes,
-        settings: dict,
-    ) -> str:
-        """Returns "sent", "skipped", or "aborted"."""
-        self._publish(message="Waiting for quiet channel…")
-        deadline = self.monotonic() + self.quiet_timeout
-        quiet = False
-        while self.monotonic() < deadline:
-            if self._stopped():
-                return "aborted"
-            status = self.get_status() or {}
-            depth = status.get("tx_queue")
-            if (depth is None or int(depth) == 0) and status.get("channel_state") != "tx":
-                quiet = True
-                break
-            self._wait(PACING_POLL_S)
-        if not quiet:
-            self._publish(message="Channel busy — robust announcement skipped")
-            return "skipped"
-
-        cfg = self.get_config()
-        if cfg is None:
-            self._fail("lost config during announcement")
-            return "aborted"
-        restore = target_settings(cfg)
-        switched = False
-        try:
-            robust_mode = ANNOUNCE_ROBUST_MODE
-            if cfg.get("modem_type") == 2:
-                robust_mode = int(cfg.get("robust_mode", ANNOUNCE_ROBUST_MODE))
-            else:
-                self._publish(message="Switching to ROBUST for announcement…")
-                if not self._stopped() and not self.set_config(
-                    {"modem_type": 2, "robust_mode": robust_mode}
-                ):
-                    self._fail("mode switch rejected by modem")
-                    return "aborted"
-                switched = True
-                verify = self.get_config() or {}
-                if verify.get("modem_type") != 2:
-                    self._fail("mode switch not confirmed by modem")
-                    return "aborted"
-
-            frame = protocol.encode_file_start(
-                transfer_id,
-                size,
-                chunk_size,
-                total_chunks,
-                name,
-                sha256,
-                settings,
-                flags=FLAG_ROBUST_ANNOUNCED | (FLAG_POSTAMBLE if cfg.get("postamble") else 0),
-            )
-            self._publish(message="Broadcasting robust announcement…")
-            if not self._send_start(frame, 3):
-                return "aborted"
-            if not self._wait_drain(self.drain_timeout):
-                if self._stopped():
-                    return "aborted"
-                self._fail("TX did not drain during announcement")
-                return "aborted"
-            return "sent"
-        finally:
-            if switched:
-                self._publish(message="Restoring modem mode…")
-                restored = False
-                for _ in range(3):
-                    self.set_config(dict(restore))
-                    verify = self.get_config() or {}
-                    if all(
-                        verify.get(k) == v
-                        for k, v in restore.items()
-                        if k in verify
-                    ):
-                        restored = True
-                        break
-                    if self._wait(0.3):
-                        break
-                if not restored:
-                    log.error("could not restore modem config after announce")
-                    self.emit(
-                        "notify",
-                        level="error",
-                        message="CRITICAL: modem mode restore failed; re-check station settings",
-                    )
-                    self._abort.set()
-
-    def _run(self, path: str, robust_announce: bool) -> None:
+    def _run(self, path: str) -> None:
         snap = self.snapshot
         assert snap is not None
 
@@ -389,18 +271,6 @@ class FileSender:
                 message=f"large transfer: {protocol.human_bytes(snap.file_size)} will take a while",
             )
 
-        announced = "skipped"
-        if robust_announce:
-            announced = self._announce(
-                transfer_id, snap.filename, snap.file_size, chunk_size, total, sha256, settings
-            )
-            if announced == "aborted":
-                if self.cancelled:
-                    self._finish(TX_CANCELLED, "cancelled")
-                elif snap.status == TX_SENDING:
-                    self._fail("robust announcement aborted")
-                return
-
         if self._stopped():
             self._finish(TX_CANCELLED, "cancelled")
             return
@@ -416,20 +286,19 @@ class FileSender:
             )
             return
 
-        if announced != "sent":
-            flags = FLAG_POSTAMBLE if cfg.get("postamble") else 0
-            start = protocol.encode_file_start(
-                transfer_id,
-                snap.file_size,
-                chunk_size,
-                total,
-                snap.filename,
-                sha256,
-                settings,
-                flags=flags,
-            )
-            if not self._send_start(start, 2):
-                return
+        flags = FLAG_POSTAMBLE if cfg.get("postamble") else 0
+        start = protocol.encode_file_start(
+            transfer_id,
+            snap.file_size,
+            chunk_size,
+            total,
+            snap.filename,
+            sha256,
+            settings,
+            flags=flags,
+        )
+        if not self._send_start(start, 2):
+            return
 
         # paced chunk loop
         depth: int | None = None
@@ -554,16 +423,12 @@ class IncomingFiles:
         emit: Callable[..., None],
         outgoing_ids: set[int],
         accept_self: Callable[[], bool],
-        apply_announced: Callable[[], bool],
-        apply_settings: Callable[[dict, str], None],
         idle_timeout: float = INCOMING_IDLE_TIMEOUT_S,
     ) -> None:
         self.downloads_dir = downloads_dir
         self.emit = emit
         self.outgoing_ids = outgoing_ids
         self.accept_self = accept_self
-        self.apply_announced = apply_announced
-        self.apply_settings = apply_settings
         self.idle_timeout = idle_timeout
         self.transfers: dict[int, _Incoming] = {}
         self.max_records = 64
@@ -601,11 +466,6 @@ class IncomingFiles:
             return
         self.transfers[fs.transfer_id] = transfer
         self._evict_old()
-        if fs.flags & FLAG_ROBUST_ANNOUNCED:
-            if self.apply_announced():
-                fields = announced_settings_to_fields(fs)
-                if fields:
-                    self.apply_settings(fields, announced_mode_label(fs))
         transfer.message = f"receiving {name}"
         self._update(transfer)
 
@@ -620,8 +480,7 @@ class IncomingFiles:
             return f"total_chunks {fs.total_chunks} != expected {expected}"
         if fs.total_chunks > FILE_MAX_CHUNKS:
             return "too many chunks"
-        if announced_settings_to_fields(fs) is None:
-            return "invalid announced settings"
+        return settings_in_range(fs)
         return None
 
     def handle_chunk(self, env: protocol.Envelope) -> None:

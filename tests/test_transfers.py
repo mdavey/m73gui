@@ -11,7 +11,6 @@ import unittest
 
 from m73gui import protocol
 from m73gui.constants import (
-    FLAG_ROBUST_ANNOUNCED,
     KIND_FILE_CHUNK,
     KIND_FILE_END,
     KIND_FILE_START,
@@ -19,7 +18,6 @@ from m73gui.constants import (
 from m73gui.services.transfers import (
     FileSender,
     IncomingFiles,
-    announced_settings_to_fields,
     target_settings,
 )
 from m73gui.state import (
@@ -139,7 +137,6 @@ class SenderTest(unittest.TestCase):
             send_frame=station.send_frame,
             get_status=station.get_status,
             get_config=station.get_config,
-            set_config=station.set_config,
             outgoing_ids=self.outgoing_ids,
             sleep=fast_sleep(abort),
         )
@@ -152,8 +149,8 @@ class SenderTest(unittest.TestCase):
                 return data["snapshot"]
         return None
 
-    def run_sender(self, sender, path, robust=False):
-        sender.start(path, robust)
+    def run_sender(self, sender, path):
+        sender.start(path)
         self.assertTrue(
             wait_until(lambda: sender.snapshot.status in
                        (TX_SENT, TX_FAILED, TX_CANCELLED) or not sender.busy()),
@@ -185,7 +182,7 @@ class SenderTest(unittest.TestCase):
         self.assertEqual(fs.chunk_size, chunk_size)
         self.assertEqual(fs.total_chunks, total)
         self.assertEqual(fs.sha256, sha)
-        self.assertEqual(fs.flags & FLAG_ROBUST_ANNOUNCED, 0)
+        self.assertEqual(fs.flags, 0)
         self.assertEqual(fs.modem_type, 0)
         self.assertEqual(fs.modulation, 1)  # QPSK
 
@@ -234,60 +231,10 @@ class SenderTest(unittest.TestCase):
         station = FakeStation()
         path = self.make_file(492 * 200)
         sender = self.make_sender(station)
-        sender.start(path, False)
+        sender.start(path)
         wait_until(lambda: len(station.by_kind(KIND_FILE_CHUNK)) > 0)
         sender.cancel()
         self.assertTrue(wait_until(lambda: sender.snapshot.status == TX_CANCELLED))
-
-    def test_robust_announce_sequence(self):
-        station = FakeStation()
-        path = self.make_file(1500)
-        sender = self.make_sender(station)
-        self.run_sender(sender, path, robust=True)
-        self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
-
-        # switch to ROBUST then restore original modem fields
-        self.assertEqual(station.set_calls[0], {"modem_type": 2, "robust_mode": 5})
-        restore = station.set_calls[-1]
-        self.assertEqual(restore["modem_type"], 0)
-        self.assertEqual(restore["modulation"], "QPSK")
-        self.assertEqual(station.config["modem_type"], 0)  # restored
-
-        starts = station.by_kind(KIND_FILE_START)
-        self.assertEqual(len(starts), 3)  # announced: 3x, not 2x more
-        self.assertTrue(all(s.flags & FLAG_ROBUST_ANNOUNCED for s in map(
-            protocol.decode_file_start, starts)))
-        # target settings describe the post-announcement (original) mode
-        fs = protocol.decode_file_start(starts[0])
-        self.assertEqual(fs.modem_type, 0)
-        # announcement precedes chunks in wire order
-        kinds = [env.kind for _, env in station.decoded() if env]
-        self.assertEqual(kinds[:3], [KIND_FILE_START] * 3)
-        self.assertLess(kinds.index(KIND_FILE_CHUNK), kinds.index(KIND_FILE_END))
-
-    def test_announce_switch_unconfirmed_fails_and_restores(self):
-        station = FakeStation()
-        # set_config records but does not apply -> verification fails
-        station.set_config = lambda fields: (station.set_calls.append(dict(fields)), True)[1]
-        path = self.make_file(100)
-        sender = self.make_sender(station)
-        self.run_sender(sender, path, robust=True)
-        self.assertEqual(sender.snapshot.status, TX_FAILED)
-        # restore attempts after the failed switch (retry loop up to 3)
-        self.assertGreaterEqual(len(station.set_calls), 2)
-        self.assertEqual(station.set_calls[-1]["modem_type"], 0)
-
-    def test_announce_skipped_when_busy(self):
-        station = FakeStation(status={"tx_queue": 3, "channel_state": "tx"})
-        path = self.make_file(100)
-        sender = self.make_sender(station)
-        sender.quiet_timeout = 0.2
-        sender.drain_timeout = 0.3
-        self.run_sender(sender, path, robust=True)
-        # skipped announcement but normal send proceeds
-        self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
-        self.assertEqual(len(station.set_calls), 0)
-        self.assertEqual(len(station.by_kind(KIND_FILE_START)), 2)
 
     def test_mode_change_makes_frames_too_large(self):
         station = FakeStation()
@@ -316,7 +263,6 @@ class ReceiverTest(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.events: list[tuple[str, dict]] = []
         self.outgoing_ids: set[int] = set()
-        self.applied: list[tuple[dict, str]] = []
 
         def emit(kind, **data):
             self.events.append((kind, data))
@@ -326,8 +272,6 @@ class ReceiverTest(unittest.TestCase):
             emit=emit,
             outgoing_ids=self.outgoing_ids,
             accept_self=lambda: False,
-            apply_announced=lambda: True,
-            apply_settings=lambda f, label: self.applied.append((f, label)),
             idle_timeout=0.3,
         )
 
@@ -524,44 +468,6 @@ class ReceiverTest(unittest.TestCase):
         s = start_with(settings={**settings, "modem_type": 9})
         self.files.handle_start(s, protocol.decode_file_start(s))
         self.assertEqual(len(self.files.transfers), before)
-
-    def test_announced_settings_applied_only_when_flagged_and_enabled(self):
-        data = os.urandom(100)
-        tid, _ = self.broadcast(data)  # flags=0
-        self.assertEqual(self.applied, [])
-        # flagged start with apply on
-        settings = target_settings(BASE_CONFIG)
-        raw = protocol.encode_file_start(
-            4242, len(data), protocol.chunk_size_for(512), 1, "x.bin",
-            hashlib.sha256(data).digest(),
-            {**settings, "modem_type": 2, "robust_mode": 5},
-            flags=FLAG_ROBUST_ANNOUNCED,
-        )
-        env = protocol.decode_envelope(raw)
-        self.files.handle_start(env, protocol.decode_file_start(env))
-        self.assertEqual(len(self.applied), 1)
-        fields, label = self.applied[0]
-        self.assertEqual(fields, {"modem_type": 2, "robust_mode": 5})
-        self.assertIn("RDM-1200S", label)
-        # toggle off -> no further applies
-        self.applied.clear()
-        self.files.apply_announced = lambda: False
-        self.files.transfers.pop(4242, None)
-        env = protocol.decode_envelope(raw)
-        self.files.handle_start(env, protocol.decode_file_start(env))
-        self.assertEqual(self.applied, [])
-
-
-class AnnounceFieldsTest(unittest.TestCase):
-    def test_translation_ranges(self):
-        settings = target_settings(BASE_CONFIG)
-        raw = protocol.encode_file_start(
-            1, 0, 100, 0, "a", b"\x00" * 32,
-            {"modem_type": 1, "mfsk_mode": 2}, flags=0,
-        )
-        fs = protocol.decode_file_start(protocol.decode_envelope(raw))
-        self.assertEqual(announced_settings_to_fields(fs), {"modem_type": 1, "mfsk_mode": 2})
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -143,14 +143,11 @@ class EndToEndTest(unittest.TestCase):
         total = (len(data) + chunk_size - 1) // chunk_size
         tid = protocol.new_transfer_id()
 
-        applied: list[tuple[dict, str]] = []
         files = IncomingFiles(
             downloads_dir=os.path.join(self.tmp, "dl"),
             emit=lambda kind, **d: self.events.put((kind, d)),
             outgoing_ids=set(),
             accept_self=lambda: False,
-            apply_announced=lambda: False,
-            apply_settings=lambda f, label: applied.append((f, label)),
         )
 
         def serve():
@@ -198,7 +195,6 @@ class EndToEndTest(unittest.TestCase):
                         os.path.join(self.tmp, "dl")))
                     break
         self.assertTrue(routed, "incoming transfer never completed")
-        self.assertEqual(applied, [])
 
 
 if __name__ == "__main__":
