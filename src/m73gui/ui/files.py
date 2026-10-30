@@ -1,4 +1,4 @@
-"""Files tab: outgoing broadcast transfers and incoming reassembly list."""
+"""Files tab: outgoing rsfec block broadcasts and incoming reassembly list."""
 
 from __future__ import annotations
 
@@ -9,7 +9,15 @@ import customtkinter as ctk
 
 from .. import phytime, protocol
 from ..constants import COL_WARN
+from ..services import transfers
 from ..state import TX_CANCELLED, TX_FAILED, TX_SENT
+
+FEC_CHOICES = {
+    "L1 · +14% parity": 1,
+    "L2 · +20% parity": 2,
+    "L3 · +33% parity": 3,
+    "L4 · +100% parity": 4,
+}
 from . import theme
 from .theme import BG, FG, FG_DIM, FONTS
 from .widgets import Card
@@ -36,11 +44,19 @@ class FilesTab(ctk.CTkFrame):
             row1, text="no file selected", font=FONTS["small"], text_color=FG_DIM
         )
         self.file_label.pack(side="left", padx=10)
+        ctk.CTkLabel(row1, text="FEC", font=FONTS["small"],
+                     text_color=FG_DIM).pack(side="left", padx=(10, 2))
+        self.fec_box = ctk.CTkComboBox(
+            row1, values=list(FEC_CHOICES), width=150, state="readonly"
+        )
+        self.fec_box.set("L2 · +20% parity")
+        self.fec_box.pack(side="left")
 
         ctk.CTkLabel(
             out_card,
-            text="Best-effort broadcast: no delivery confirmation. Large files take "
-            "significant airtime.",
+            text="Best-effort broadcast with forward error correction: lost "
+            "packets are repaired by the receiver, no delivery confirmation. "
+            "Large files take significant airtime.",
             font=FONTS["small"],
             text_color=COL_WARN,
             anchor="w",
@@ -69,8 +85,7 @@ class FilesTab(ctk.CTkFrame):
 
         tree = ttk.Treeview(
             in_card,
-            columns=("sender", "name", "progress", "chunks", "status", "missing",
-                     "path"),
+            columns=("sender", "name", "blocks", "progress", "status", "path"),
             show="headings",
             height=7,
         )
@@ -78,10 +93,9 @@ class FilesTab(ctk.CTkFrame):
         spec = [
             ("sender", "Sender", 80),
             ("name", "File", 180),
+            ("blocks", "Blocks", 100),
             ("progress", "Progress", 90),
-            ("chunks", "Chunks", 100),
             ("status", "Status", 110),
-            ("missing", "Missing", 70),
             ("path", "Saved to", 300),
         ]
         for key, label, width in spec:
@@ -116,6 +130,9 @@ class FilesTab(ctk.CTkFrame):
 
     # -- outgoing -----------------------------------------------------------
 
+    def selected_fec(self) -> int:
+        return FEC_CHOICES.get(self.fec_box.get(), 2)
+
     def _pick(self) -> None:
         from tkinter import filedialog
 
@@ -128,19 +145,24 @@ class FilesTab(ctk.CTkFrame):
         except OSError as exc:
             self.file_label.configure(text=f"error: {exc}")
             return
-        chunk = self.app.chunk_size()
+        block = self.app.block_size()
         text = f"{os.path.basename(path)}  ({protocol.human_bytes(size)})"
-        if chunk:
-            chunks = (size + chunk - 1) // chunk if size else 0
-            text += f"  ·  {chunks} chunks × {chunk} B"
+        if block:
+            fec = self.selected_fec()
+            total = transfers.blocks_needed(
+                os.path.basename(path), size, block, fec
+            )
+            text += f"  ·  {total} blocks × {block} B · FEC L{fec}"
             est = phytime.estimate_transfer_seconds(
-                self.app.state.config, chunks
+                self.app.state.config, total
             )
             text += f"  ·  ~{phytime.human_duration(est)} airtime"
+            if block < transfers.SMALL_BLOCK_WARN:
+                text += "  ·  header-heavy blocks on this mode"
         self.file_label.configure(text=text)
 
     def clear_selection(self) -> None:
-        """Forget the picked file and its chunk math (e.g. after a mode change
+        """Forget the picked file and its block math (e.g. after a mode change
         altered the frame size)."""
         self.selected_path = None
         self.file_label.configure(text="no file selected")
@@ -151,7 +173,7 @@ class FilesTab(ctk.CTkFrame):
         if not self.selected_path:
             self.app.notify("Pick a file first", level="warn")
             return
-        err = self.app.send_file(self.selected_path)
+        err = self.app.send_file(self.selected_path, fec=self.selected_fec())
         if err:
             self.app.notify(err, level="error")
 
@@ -163,7 +185,7 @@ class FilesTab(ctk.CTkFrame):
             return
         self.progress.set(snap.fraction)
         text = (
-            f"{snap.filename}: {snap.sent_chunks}/{snap.total_chunks or 0} chunks "
+            f"{snap.filename}: {snap.sent_blocks}/{snap.total_blocks or 0} blocks "
             f"({protocol.human_bytes(snap.sent_bytes)} queued) — {snap.message}"
         )
         color = FG_DIM
@@ -188,11 +210,10 @@ class FilesTab(ctk.CTkFrame):
         pct = f"{snap.fraction * 100:.0f}%"
         values = (
             snap.sender or "?",
-            snap.name,
+            snap.name or "—",
+            f"{snap.received_blocks}/{snap.total_blocks}",
             pct,
-            f"{snap.received_chunks}/{snap.total_chunks}",
             snap.status,
-            snap.missing_chunks,
             snap.path or snap.message,
         )
         if self.tree.exists(iid):
