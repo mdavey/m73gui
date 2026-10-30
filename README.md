@@ -1,0 +1,88 @@
+# m73gui
+
+A desktop GUI for [modem73](https://github.com/RFnexus/modem73) — the amateur-radio
+OFDM/MFSK/RDM data modem. modem73 is a capable but headless TNC: it gives you a
+control port, a KISS port, and a log. m73gui turns that into a proper application —
+chat, file broadcasting, a live look at what's on the channel, and an editor for the
+modem's settings.
+
+## Why
+
+Sending anything meaningful over a ~1 kbps radio link is fiddly: you need to know
+the current mode's payload size, chunk files by hand, and you have no visibility
+into what the modem is doing. m73gui handles the framing, pacing and reassembly
+for you, and shows you the channel while it happens. It talks to modem73 purely
+over its network ports (JSON control + KISS data), so the GUI can run on a laptop
+next to the radio, or across the house from a machine hosting the audio.
+
+## Features
+
+- **Chat** — free-text messages broadcast to everyone on the channel, with a
+  scrolling history that is rebuilt from modem73's frame history after
+  reconnects.
+- **Files** — pick a file, see its size, chunk count, estimated airtime, and send
+  it as a best-effort broadcast. Incoming transfers reassemble automatically into
+  `~/Downloads/m73gui/` with SHA-256 verification and missing-chunk reports.
+- **Packets** — a live table of every decoded frame (mode, SNR, BER, payload) with
+  a detail view, plus a summary of everything you transmit.
+- **Channel** — waterfall-style sparklines for SNR and occupancy, station count,
+  and transmit queue depth, sampled from the control port.
+- **Settings** — every modem73 configuration field in a validated form: callsign,
+  modem type, modulation, code rate, frame size, CSMA options, and more. Only
+  changed fields are written back.
+
+The app never keys the radio by itself — it only frames data and hands it to
+modem73, which does its own CSMA before transmitting.
+
+## Requirements
+
+- Python 3.14+ and [uv](https://docs.astral.sh/uv/)
+- A working display (X11 or XWayland)
+- [modem73](https://github.com/RFnexus/modem73) running with both its control port
+  (default `127.0.0.1:8073`) and KISS port (default port `8001`) enabled
+- Amateur radio privileges for whatever you transmit, obviously
+
+The only Python dependency is `customtkinter`.
+
+## Running
+
+```sh
+uv sync
+uv run m73gui
+```
+
+That connects to modem73 on localhost. To drive a remote modem:
+
+```sh
+m73gui 192.168.1.50                      # control on :8073, KISS on :8001
+m73gui 192.168.1.50:8073 --kiss 192.168.1.50:8001
+```
+
+A remote setup needs modem73 started with `--control-bind` on a reachable address
+(it binds to localhost by default).
+
+Other flags: `--appearance dark|light|system`, `--debug` (protocol logging to
+stderr), `--version`.
+
+## Things to know
+
+- **Broadcast only.** Chat and files have no addressing, no ACKs, and no resume.
+  If a chunk is lost, the receiver shows it as missing; send the file again if it
+  matters. (Robust FEC is planned for a future version.)
+- **Nothing is private.** Every connected KISS client — on any m73gui instance —
+  sees all decoded payloads.
+- **Airtime adds up.** A 100 KB file on a robust mode can take the better part of
+  an hour. The estimated airtime shown when you pick a file ignores CSMA waits,
+  so treat it as a lower bound on a busy channel.
+- **Transfers are local.** Incoming files land in `~/Downloads/m73gui/` with
+  duplicate names de-duplicated automatically.
+- modem73's `tx_frame_count` is broken upstream, so TX counts in the GUI are
+  counted locally instead.
+
+## Development
+
+Tests use plain `unittest` (no modem or display required):
+
+```sh
+uv run python -m unittest discover -s tests
+```
