@@ -7,7 +7,7 @@ import subprocess
 
 import customtkinter as ctk
 
-from .. import protocol
+from .. import phytime, protocol
 from ..constants import COL_WARN
 from ..state import TX_CANCELLED, TX_FAILED, TX_SENT
 from . import theme
@@ -133,6 +133,10 @@ class FilesTab(ctk.CTkFrame):
         if chunk:
             chunks = (size + chunk - 1) // chunk if size else 0
             text += f"  ·  {chunks} chunks × {chunk} B"
+            est = phytime.estimate_transfer_seconds(
+                self.app.state.config, chunks
+            )
+            text += f"  ·  ~{phytime.human_duration(est)} airtime"
         self.file_label.configure(text=text)
 
     def clear_selection(self) -> None:
