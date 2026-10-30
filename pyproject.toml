@@ -6,6 +6,7 @@ license = "MIT"
 requires-python = ">=3.14"
 dependencies = [
     "customtkinter>=6.0.0",
+    "rsfec",
 ]
 
 [project.scripts]
@@ -17,3 +18,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/m73gui"]
+
+[tool.uv.workspace]
+members = ["src/rsfec"]
+
+[tool.uv.sources]
+rsfec = { workspace = true }
