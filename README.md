@@ -6,6 +6,8 @@ control port, a KISS port, and a log. m73gui puts a friendly front end on it —
 chat, file broadcasting, a live look at what's on the channel, and an editor for the
 modem's settings.
 
+![m73gui on the Files tab: Tx Settings, an outgoing file transfer in progress, and an incoming transfer being reassembled](screenshot.png)
+
 ## Why
 
 Sending anything meaningful over a ~1 kbps radio link is fiddly: you need to know
@@ -63,8 +65,8 @@ uv run m73gui
 That connects to modem73 on localhost. To drive a remote modem:
 
 ```sh
-m73gui 192.168.1.50                      # control on :8073, KISS on :8001
-m73gui 192.168.1.50:8073 --kiss 192.168.1.50:8001
+uv run m73gui 192.168.1.50                    # control on :8073, KISS on :8001
+uv run m73gui 192.168.1.50:8073 --kiss 192.168.1.50:8001
 ```
 
 A remote setup needs modem73 started with `--control-bind` on a reachable address
