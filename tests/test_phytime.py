@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from m73gui import phytime
+from m73gui.constants import ROBUST_MODE_MTU
 
 
 class FrameSecondsTest(unittest.TestCase):
@@ -62,6 +63,70 @@ class FrameSecondsTest(unittest.TestCase):
             phytime.frame_seconds({"modem_type": 2, "robust_mode": 99}),
             phytime._DEFAULT_FRAME_S,
         )
+
+
+class PayloadBytesForTest(unittest.TestCase):
+    # Values cross-checked against modem73 phy/common.hh Common::setup,
+    # phy/mfsk_modem.hh MFSKParams, phy/robust_modem.hh RobustParams.
+    OFDM = {"modem_type": 0, "code_rate": "1/2", "frame_size": 1}
+
+    def ofdm(self, mod, rate="1/2", frame=1):
+        return phytime.payload_bytes_for(
+            {"modem_type": 0, "modulation": mod, "code_rate": rate,
+             "frame_size": frame}
+        )
+
+    def test_ofdm_spot_values(self):
+        self.assertEqual(self.ofdm("QPSK"), 512)  # matches live get_config
+        self.assertEqual(self.ofdm("QPSK", frame=0), 128)
+        self.assertEqual(self.ofdm("QPSK", frame=2), 1024)
+        self.assertEqual(self.ofdm("BPSK"), 256)  # odd symbols: order +1
+        self.assertEqual(self.ofdm("8PSK"), 1024)
+        self.assertEqual(self.ofdm("QAM16", "3/4"), 1536)
+        self.assertEqual(self.ofdm("QAM64", "5/6", frame=2), 6816)  # order 16
+
+    def test_ofdm_order17_rejected(self):
+        self.assertEqual(self.ofdm("QAM4096", "5/6"), 6816)  # normal -> 16
+        self.assertEqual(self.ofdm("QAM4096", "5/6", frame=2), 0)  # long -> 17
+        self.assertEqual(self.ofdm("QAM1024", frame=2), 0)
+
+    def test_ofdm_repeat2_needs_order_le_15(self):
+        self.assertEqual(self.ofdm("BPSK", "1/2x2"), 256)  # same polar bits
+        self.assertEqual(self.ofdm("QAM4096", "1/2x2"), 0)  # order 16
+        self.assertEqual(self.ofdm("BPSK", "1/4x2"), 128)
+
+    def test_ofdm_micro_is_qpsk_half_only(self):
+        self.assertEqual(self.ofdm("QPSK", "1/2", frame=3), 32)
+        self.assertEqual(self.ofdm("QPSK", "3/4", frame=3), 0)
+        self.assertEqual(self.ofdm("8PSK", frame=3), 0)
+
+    def test_ofdm_string_frame_size_and_invalid(self):
+        self.assertEqual(self.ofdm("QPSK", frame="normal"), 512)
+        self.assertEqual(self.ofdm("NOPE"), 0)
+        self.assertEqual(self.ofdm("QPSK", rate="7/8"), 0)
+
+    def test_mfsk(self):
+        for mode, want in enumerate((21, 29, 37, 57)):
+            got = phytime.payload_bytes_for(
+                {"modem_type": 1, "mfsk_mode": mode}
+            )
+            self.assertEqual(got, want, f"MFSK mode {mode}")
+        self.assertEqual(
+            phytime.payload_bytes_for({"modem_type": 1, "mfsk_mode": 9}), 0
+        )
+
+    def test_robust(self):
+        got = phytime.payload_bytes_for({"modem_type": 2, "robust_mode": 0})
+        self.assertEqual(got, ROBUST_MODE_MTU[0] + 2)
+        self.assertEqual(
+            phytime.payload_bytes_for({"modem_type": 2, "robust_mode": 5}), 172
+        )
+        self.assertEqual(
+            phytime.payload_bytes_for({"modem_type": 2, "robust_mode": 99}), 0
+        )
+
+    def test_empty_config_defaults_to_ofdm_invalid(self):
+        self.assertEqual(phytime.payload_bytes_for({}), 0)
 
 
 class EstimateTest(unittest.TestCase):

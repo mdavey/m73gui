@@ -8,6 +8,8 @@ are not modelled beyond a flat per-frame slack.
 
 from __future__ import annotations
 
+from .constants import ROBUST_MODE_MTU
+
 # per-frame sender pacing / CSMA / PTT-gap slack in seconds (measured on a
 # real link: ~0.6 s between consecutive frames beyond pure airtime)
 CHUNK_OVERHEAD_S = 0.6
@@ -76,6 +78,97 @@ def frame_seconds(config: dict) -> float:
     if config.get("postamble"):
         seconds += 0.4
     return seconds
+
+
+# --------------------------------------------------------------------------
+# Payload capacity model, mirroring modem73 (phy/common.hh Common::setup,
+# phy/mfsk_modem.hh MFSKParams, phy/robust_modem.hh RobustParams::data_bytes).
+# Must be kept in lockstep with modem73, same as the frame timing above.
+# --------------------------------------------------------------------------
+
+# modulation -> (data symbol count, polar code order) at short frame size
+_OFDM_PARAMS = {
+    "BPSK": (8, 11),
+    "QPSK": (4, 11),
+    "8PSK": (11, 13),
+    "QAM16": (4, 12),
+    "QAM64": (11, 14),
+    "QAM256": (8, 14),
+    "QAM1024": (13, 15),
+    "QAM4096": (11, 15),
+}
+
+# polar data bits at code order 11 per code rate; doubles per order above 11
+_OFDM_RATE_DATA_BITS = {
+    "1/2": 1024,
+    "2/3": 1368,
+    "3/4": 1536,
+    "5/6": 1704,
+    "1/4": 512,
+    "1/2x2": 1024,
+    "1/4x2": 512,
+}
+_REPEAT2_RATES = {"1/2x2", "1/4x2"}
+
+
+def _mfsk_payload(mode: int) -> int:
+    """Frame capacity (reported payload_size) for MFSK-8/16/32/32R."""
+    bits_per_symbol = (3, 4, 5, 5)[mode]
+    coded = 128 * bits_per_symbol
+    if mode == 3:  # MFSK-32R uses the rate-3/4 convolutional code
+        data_bytes = (coded * 3 // 4 - 6) // 8
+    else:
+        data_bytes = (coded // 2 - 6) // 8
+    return data_bytes - 2
+
+
+def payload_bytes_for(config: dict) -> int:
+    """Frame payload capacity as modem73's get_config would report
+    payload_size for the given mode fields; 0 when the combo is invalid
+    or unsupported."""
+    try:
+        mtype = int(config.get("modem_type", 0) or 0)
+    except (TypeError, ValueError):
+        mtype = 0
+    if mtype == 1:  # MFSK
+        try:
+            return _mfsk_payload(int(config.get("mfsk_mode", 0)))
+        except (IndexError, TypeError, ValueError):
+            return 0
+    if mtype == 2:  # ROBUST
+        try:
+            return ROBUST_MODE_MTU[int(config.get("robust_mode", 0))] + 2
+        except (KeyError, TypeError, ValueError):
+            return 0
+    # OFDM
+    rate = _OFDM_RATE_DATA_BITS.get(str(config.get("code_rate", "")))
+    params = _OFDM_PARAMS.get(str(config.get("modulation", "")))
+    if rate is None or params is None:
+        return 0
+    symbols, order = params
+    frame_size = config.get("frame_size", 1)
+    if isinstance(frame_size, str):
+        frame_size = {
+            "short": 0, "normal": 1, "long": 2, "micro": 3,
+        }.get(frame_size.lower(), 1)
+    try:
+        frame_size = int(frame_size)
+    except (TypeError, ValueError):
+        frame_size = 1
+    if frame_size == 3:  # microburst family is QPSK + rate 1/2 only
+        if (config.get("modulation") == "QPSK"
+                and str(config.get("code_rate", "")) == "1/2"):
+            return 32
+        return 0
+    if frame_size >= 1:  # normal (long applies the normal step as well)
+        order += 2 if symbols == 4 else 1
+    if frame_size == 2:
+        order += 1
+    if order > 16:
+        return 0
+    if str(config.get("code_rate", "")) in _REPEAT2_RATES and order > 15:
+        return 0
+    return (rate << (order - 11)) // 8
 
 
 def estimate_transfer_seconds(config: dict, frames: int) -> float:
