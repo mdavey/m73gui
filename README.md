@@ -19,20 +19,25 @@ next to the radio, or across the house from a machine hosting the audio.
 
 - **Chat** — free-text messages broadcast to everyone on the channel, with a
   scrolling history that is rebuilt from modem73's frame history after
-  reconnects.
-- **Files** — pick a file (up to 1 MiB), choose a Reed–Solomon FEC level, see the
-  block count and estimated airtime, and broadcast it. Lost packets are repaired
-  by the receiver's error correction — no retransmits, no per-chunk bookkeeping.
-  Incoming transfers reassemble automatically into `~/Downloads/m73gui/` with
-  SHA-1 verification; the sender can pick from L1 (~14% overhead) to L4 (+100%).
+  reconnects. A mode row above the composer picks the transmit mode
+  (OFDM / MFSK / ROBUST); the choice is pushed to the modem when you press
+  Send.
+- **Files** — pick a file (up to 1 MiB), choose a mode and a Reed–Solomon FEC
+  level, see the block count and estimated airtime (both recompute instantly
+  when you change either, even before the modem knows about it), and broadcast
+  it. Lost packets are repaired by the receiver's error correction — no
+  retransmits, no per-chunk bookkeeping. Incoming transfers reassemble
+  automatically into `~/.m73gui/received/<yyyy-mm-dd>/` with SHA-1
+  verification; the sender can pick from L1 (~14% overhead) to L4 (+100%).
 - **Packets** — a live table of every decoded frame (mode, SNR, BER, payload) with
   a detail view, plus a summary of everything you transmit.
 - **Channel** — link-quality trend charts fed by every decoded frame (per-frame
   SNR and BER), an occupancy bar, population/TX-queue/PTT metrics, modem error
   counters, and audio/rigctld health.
-- **Settings** — every modem73 configuration field in a validated form: callsign,
-  modem type, modulation, code rate, frame size, CSMA options, and more. Only
-  changed fields are written back.
+- **Settings** — callsign, CSMA, TX, and RX-decoder fields in a validated form;
+  only changed fields are written back. The modem's live mode appears there as
+  a read-only view plus a plain-language guide to the mode families — you
+  change modes from the Chat and Files tabs instead.
 
 The app never keys the radio by itself — it only frames data and hands it to
 modem73, which does its own CSMA before transmitting.
@@ -68,6 +73,16 @@ A remote setup needs modem73 started with `--control-bind` on a reachable addres
 Other flags: `--appearance dark|light|system`, `--debug` (protocol logging to
 stderr), `--version`.
 
+## State on disk
+
+Everything m73gui keeps lives under `~/.m73gui/`:
+
+| Path | What |
+| --- | --- |
+| `settings.json` | per-tab mode choices, FEC level, loopback preference (survives restarts) |
+| `logs/m73gui.log` | rotating log (1 MB × 3) |
+| `received/<yyyy-mm-dd>/` | completed incoming files, one folder per day |
+
 ## Things to know
 
 - **Broadcast only.** Chat and files have no addressing, no ACKs, and no resume.
@@ -80,8 +95,14 @@ stderr), `--version`.
   an hour, and the FEC parity blocks add 14–100% on top depending on level. The
   estimated airtime shown when you pick a file ignores CSMA waits, so treat it as
   a lower bound on a busy channel.
-- **Transfers are local.** Incoming files land in `~/Downloads/m73gui/` with
-  duplicate names de-duplicated automatically.
+- **Transfers are local.** Incoming files land in
+  `~/.m73gui/received/<yyyy-mm-dd>/` with duplicate names de-duplicated
+  automatically.
+- **Mode edits apply on Send.** The Chat and Files mode rows are independent
+  intentions; a dim hint marks them as pending until you press Send, which
+  pushes the mode first and transmits on it right away. Chatting while a file
+  transfer runs defers the chat tab's mode (changing it mid-broadcast would
+  resize frames under the running stream).
 - modem73's `tx_frame_count` is broken upstream, so TX counts in the GUI are
   counted locally instead.
 
