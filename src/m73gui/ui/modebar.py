@@ -92,8 +92,10 @@ class ModeRow(ctk.CTkFrame):
             2: ("robust_mode",),
         }
         # persistent slot for the owning tab's extra controls; menus are
-        # re-packed before it so it always stays rightmost
-        self.trailing = ctk.CTkFrame(self, fg_color="transparent")
+        # re-packed before it so it always stays rightmost. A childless
+        # CTkFrame would request its default 200x200, so start at zero.
+        self.trailing = ctk.CTkFrame(self, fg_color="transparent",
+                                     width=0, height=0)
         self.trailing.pack(side="left")
         self._apply_visibility()
 

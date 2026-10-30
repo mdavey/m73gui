@@ -53,7 +53,7 @@ class FilesTab(ctk.CTkFrame):
         self.fec_box.pack(side="left")
 
         # ---- outgoing ----
-        out_card = Card(outer, "Outgoing broadcast")
+        out_card = Card(outer, "Outgoing transfer")
         out_card.pack(fill="x", pady=4)
         row1 = ctk.CTkFrame(out_card, fg_color="transparent")
         row1.pack(fill="x", padx=12, pady=(6, 2))
