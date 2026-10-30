@@ -29,9 +29,9 @@ next to the radio, or across the house from a machine hosting the audio.
   retransmits, no per-chunk bookkeeping. Incoming transfers reassemble
   automatically into `~/.m73gui/received/<yyyy-mm-dd>/` with SHA-1
   verification; the sender can pick from L1 (~14% overhead) to L4 (+100%).
-- **Packets** — a live table of every decoded frame (mode, SNR, BER, payload) with
+- **Packet Log** — a live table of every decoded frame (mode, SNR, BER, payload) with
   a detail view, plus a summary of everything you transmit.
-- **Channel** — link-quality trend charts fed by every decoded frame (per-frame
+- **Status** — link-quality trend charts fed by every decoded frame (per-frame
   SNR and BER), an occupancy bar, population/TX-queue/PTT metrics, modem error
   counters, and audio/rigctld health.
 - **Settings** — callsign, CSMA, TX, and RX-decoder fields in a validated form;

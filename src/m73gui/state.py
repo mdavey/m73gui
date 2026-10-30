@@ -23,7 +23,7 @@ TX_FAILED = "failed"
 
 @dataclass
 class PacketRow:
-    """One row in the Packets table."""
+    """One row in the Packet Log table."""
 
     time: float
     direction: str

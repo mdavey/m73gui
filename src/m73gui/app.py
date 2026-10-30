@@ -123,10 +123,10 @@ class App:
         self.tabs.pack(fill="both", expand=True, padx=8, pady=(2, 2))
         for cls, title, attr in [
             (ChatTab, "Chat", "chat_tab"),
-            (PacketsTab, "Packets", "packets_tab"),
             (FilesTab, "Files", "files_tab"),
+            (PacketsTab, "Packet Log", "packets_tab"),
+            (ChannelTab, "Status", "channel_tab"),
             (SettingsTab, "Settings", "settings_tab"),
-            (ChannelTab, "Channel", "channel_tab"),
         ]:
             tab = cls(self.tabs.add(title), self)
             tab.pack(fill="both", expand=True)

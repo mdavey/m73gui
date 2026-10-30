@@ -1,4 +1,4 @@
-"""Packets tab: table of RX/TX frames with details and raw dump."""
+"""Packet Log tab: table of RX/TX frames with details and raw dump."""
 
 from __future__ import annotations
 

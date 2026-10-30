@@ -1,4 +1,4 @@
-"""Channel tab: event-driven link quality plus modem activity/counters."""
+"""Status tab: event-driven link quality plus modem activity/counters."""
 
 from __future__ import annotations
 
