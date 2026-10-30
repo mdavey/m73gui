@@ -98,6 +98,20 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stderr,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        from .userdirs import log_dir
+
+        file_handler = RotatingFileHandler(
+            log_dir() / "m73gui.log", maxBytes=1_000_000, backupCount=3
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
+    except OSError:
+        pass  # unwritable ~/.m73gui: keep stderr logging only
 
     from .app import run  # deferred so --help works without tkinter
 

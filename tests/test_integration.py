@@ -143,7 +143,7 @@ class EndToEndTest(unittest.TestCase):
         lost = {1}  # simulated packet loss: within the L2 repair budget
 
         files = IncomingFiles(
-            downloads_dir=os.path.join(self.tmp, "dl"),
+            downloads_dir=lambda: os.path.join(self.tmp, "dl"),
             emit=lambda kind, **d: self.events.put((kind, d)),
             outgoing_ids=set(),
             accept_self=lambda: False,

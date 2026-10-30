@@ -7,7 +7,7 @@ import subprocess
 
 import customtkinter as ctk
 
-from .. import phytime, protocol
+from .. import phytime, protocol, userdirs
 from ..constants import COL_WARN
 from ..services import transfers
 from ..state import INCOMING_COMPLETE, TX_CANCELLED, TX_FAILED, TX_SENT
@@ -123,7 +123,7 @@ class FilesTab(ctk.CTkFrame):
         self.accept_self.pack(side="left")
         self.dir_label = ctk.CTkLabel(
             set_card,
-            text=f"downloads: {app.downloads_dir}",
+            text=f"received files: {userdirs.received_dir()}",
             font=FONTS["mono_small"],
             text_color=FG_DIM,
             anchor="w",
@@ -254,8 +254,7 @@ class FilesTab(ctk.CTkFrame):
             self.app.notify(f"cannot open {snap.name}: {exc}", level="error")
 
     def _open_folder(self) -> None:
-        path = self.app.downloads_dir
-        os.makedirs(path, exist_ok=True)
+        path = userdirs.received_dir()
         try:
             subprocess.Popen(
                 ["xdg-open", path], stdout=subprocess.DEVNULL,

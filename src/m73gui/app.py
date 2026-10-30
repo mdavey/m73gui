@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import collections
 import logging
-import os
 import queue
 import threading
 import time
@@ -12,7 +11,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from . import protocol
+from . import protocol, userdirs
 from .constants import (
     CHAT_PARTIAL_REVEAL_S,
     COL_WARN,
@@ -57,9 +56,7 @@ class App:
         self.stop_event = threading.Event()
         self.events: "queue.Queue[tuple[str, dict]]" = queue.Queue()
         self.state = AppState()
-        self.downloads_dir = os.path.join(
-            os.path.expanduser("~"), "Downloads", "m73gui"
-        )
+        self.gui_settings = userdirs.load_settings()
 
         # network
         self.control = ControlClient(*control, self.events, self.stop_event)
@@ -76,7 +73,7 @@ class App:
             outgoing_ids=self.outgoing_ids,
         )
         self.incoming = IncomingFiles(
-            downloads_dir=self.downloads_dir,
+            downloads_dir=userdirs.received_dir,
             emit=lambda kind, **d: self.events.put((kind, d)),
             outgoing_ids=self.outgoing_ids,
             accept_self=lambda: bool(self.files_tab.accept_self.get()),

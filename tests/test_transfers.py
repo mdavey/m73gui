@@ -280,7 +280,7 @@ class ReceiverTest(unittest.TestCase):
             self.events.append((kind, data))
 
         self.files = IncomingFiles(
-            downloads_dir=os.path.join(self.tmp, "dl"),
+            downloads_dir=lambda: os.path.join(self.tmp, "dl"),
             emit=emit,
             outgoing_ids=self.outgoing_ids,
             accept_self=lambda: False,

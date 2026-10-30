@@ -413,13 +413,13 @@ class IncomingFiles:
 
     def __init__(
         self,
-        downloads_dir: str,
+        downloads_dir: Callable[[], str],  # called per save (daily folders)
         emit: Callable[..., None],
         outgoing_ids: set[int],
         accept_self: Callable[[], bool],
         idle_timeout: float = INCOMING_IDLE_TIMEOUT_S,
     ) -> None:
-        self.downloads_dir = downloads_dir
+        self.downloads_dir_fn = downloads_dir
         self.emit = emit
         self.outgoing_ids = outgoing_ids
         self.accept_self = accept_self
@@ -527,7 +527,13 @@ class IncomingFiles:
                 self._attempt_failed(stream, exc)
                 return
             name = protocol.sanitize_filename(unpacked.name)
-            path = self._unique_path(name)
+            try:
+                path = self._unique_path(name)
+            except OSError as exc:
+                stream.status = INCOMING_FAILED
+                stream.message = f"cannot create file: {exc}"
+                self.emit("transfer_rx", snapshot=stream.snapshot())
+                return
             try:
                 with open(path, "wb") as fh:
                     fh.write(unpacked.data)
@@ -583,18 +589,17 @@ class IncomingFiles:
     def _unique_path(self, name: str) -> str:
         """Atomically reserve a non-existing downloads path (workers and
         concurrent streams may race on the same filename)."""
-        os.makedirs(self.downloads_dir, exist_ok=True)
+        base = self.downloads_dir_fn()
+        os.makedirs(base, exist_ok=True)
         counter = 0
         while True:
             if counter == 0:
-                path = os.path.join(self.downloads_dir, name)
+                path = os.path.join(base, name)
             else:
                 stem, dot, ext = name.rpartition(".")
                 if not dot:
                     stem, ext = name, ""
-                path = os.path.join(
-                    self.downloads_dir, f"{stem}-{counter}{dot}{ext}"
-                )
+                path = os.path.join(base, f"{stem}-{counter}{dot}{ext}")
             try:
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
