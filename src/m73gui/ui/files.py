@@ -29,7 +29,7 @@ class FilesTab(ctk.CTkFrame):
         self.app = app
         self.selected_path: str | None = None
 
-        outer = ctk.CTkScrollableFrame(self, fg_color=BG)
+        outer = ctk.CTkFrame(self, fg_color=BG)
         outer.pack(fill="both", expand=True, padx=6, pady=6)
 
         # ---- outgoing ----
@@ -47,16 +47,16 @@ class FilesTab(ctk.CTkFrame):
         ctk.CTkLabel(row1, text="FEC", font=FONTS["small"],
                      text_color=FG_DIM).pack(side="left", padx=(10, 2))
         self.fec_box = ctk.CTkComboBox(
-            row1, values=list(FEC_CHOICES), width=150, state="readonly"
+            row1, values=list(FEC_CHOICES), width=150, state="readonly",
+            command=self._refresh_estimate,
         )
         self.fec_box.set("L2 · +20% parity")
         self.fec_box.pack(side="left")
 
         ctk.CTkLabel(
             out_card,
-            text="Best-effort broadcast with forward error correction: lost "
-            "packets are repaired by the receiver, no delivery confirmation. "
-            "Large files take significant airtime.",
+            text="Best-effort broadcast with FEC: lost packets are repaired by "
+            "the receiver. No delivery confirmation; large files take airtime.",
             font=FONTS["small"],
             text_color=COL_WARN,
             anchor="w",
@@ -140,17 +140,24 @@ class FilesTab(ctk.CTkFrame):
         if not path:
             return
         self.selected_path = path
+        self._refresh_estimate()
+
+    def _refresh_estimate(self, *_args) -> None:
+        """Re-render the selection label (file size, FEC-inclusive block count,
+        airtime) — called on pick, on FEC change, and after mode changes."""
+        if not self.selected_path:
+            return
         try:
-            size = os.path.getsize(path)
+            size = os.path.getsize(self.selected_path)
         except OSError as exc:
             self.file_label.configure(text=f"error: {exc}")
             return
+        text = f"{os.path.basename(self.selected_path)}  ({protocol.human_bytes(size)})"
         block = self.app.block_size()
-        text = f"{os.path.basename(path)}  ({protocol.human_bytes(size)})"
-        if block:
+        if block and size:
             fec = self.selected_fec()
             total = transfers.blocks_needed(
-                os.path.basename(path), size, block, fec
+                os.path.basename(self.selected_path), size, block, fec
             )
             text += f"  ·  {total} blocks × {block} B · FEC L{fec}"
             est = phytime.estimate_transfer_seconds(
