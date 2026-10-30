@@ -474,6 +474,64 @@ class ReceiverTest(unittest.TestCase):
         with open(p2, "rb") as fh:
             self.assertEqual(fh.read(), b"second!")
 
+    def feed(self, packed, indices, tid, sender="VK9RX", fec=2):
+        total = packed.total_blocks
+        for i in indices:
+            block = packed.stream[i * BLOCK : (i + 1) * BLOCK]
+            env = protocol.decode_envelope(
+                protocol.encode_file_block(tid, i, fec, total, block)
+            )
+            self.files.handle_block(env, fec, total, block, sender=sender)
+
+    def test_early_recover_before_broadcast_ends(self):
+        # L4 (parity == data): the data blocks alone are within the group
+        # erasure budget, so the file must be saved before parity arrives
+        data = os.urandom(2000)
+        tid = protocol.new_transfer_id()
+        packed = self.pack(data, fec=4)
+        total = packed.total_blocks
+        d = total // 2
+        self.feed(packed, range(d), tid, fec=4)
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE)
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(len(stream.received), d)  # completed at half the stream
+        self.assertIn("repaired", stream.message)
+        with open(stream.path, "rb") as fh:
+            self.assertEqual(fh.read(), data)
+        # stragglers are deduped; no second file, path unchanged
+        saved = stream.path
+        self.feed(packed, range(d, total), tid, fec=4)
+        time.sleep(0.05)
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(stream.status, INCOMING_COMPLETE)
+        self.assertEqual(stream.path, saved)
+        files = [
+            f for f in os.listdir(os.path.join(self.tmp, "dl"))
+            if f.startswith("file.bin")
+        ]
+        self.assertEqual(len(files), 1)
+
+    def test_no_early_attempt_below_budget(self):
+        data = os.urandom(2000)  # L4: 5 data + 5 parity
+        tid = protocol.new_transfer_id()
+        packed = self.pack(data, fec=4)
+        self.feed(packed, range(4), tid, fec=4)  # missing 6 > parity 5
+        time.sleep(0.1)  # give any (incorrect) background worker a chance
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(stream.status, INCOMING_ACTIVE)
+        self.assertEqual(stream.path, "")
+
+    def test_invalid_geometry_total_rejected(self):
+        # fec L2 totals jump 6 -> 8: total_packets == 7 is not a valid stream
+        tid = protocol.new_transfer_id()
+        env = protocol.decode_envelope(
+            protocol.encode_file_block(tid, 0, 2, 7, b"x" * BLOCK)
+        )
+        self.files.handle_block(
+            env, 2, 7, b"x" * BLOCK, sender="VK9RX"
+        )
+        self.assertEqual(len(self.files.streams), 0)
+
     def test_absurd_total_rejected(self):
         tid = protocol.new_transfer_id()
         env = protocol.decode_envelope(

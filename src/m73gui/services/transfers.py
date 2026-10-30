@@ -21,7 +21,9 @@ import time
 from typing import Callable
 
 import rsfec
-from rsfec.geometry import total_blocks_for
+from bisect import bisect_right
+
+from rsfec.geometry import decode_groups, total_blocks_for
 from rsfec.header import header_length, parse_header
 
 from .. import protocol
@@ -353,6 +355,16 @@ class _Stream:
         self.block_size = block_size
         self.buf = bytearray(total * block_size)
         self.received: set[int] = set()
+        self.groups = decode_groups(fec, total)
+        self.group_starts = [g.start_block for g in self.groups]
+        # per-group blocks still missing; a group is repairable once its
+        # missing count drops to its parity count (declared erasures)
+        self.group_missing = [g.total_blocks for g in self.groups]
+        self.groups_ok = sum(
+            1
+            for g, m in zip(self.groups, self.group_missing)
+            if m <= g.parity_blocks
+        )
         self.status = INCOMING_ACTIVE
         self.message = "receiving"
         self.path = ""
@@ -366,6 +378,19 @@ class _Stream:
     @property
     def finalized(self) -> bool:
         return self.status in (INCOMING_COMPLETE, INCOMING_FAILED)
+
+    def record(self, seq: int) -> None:
+        """Bookkeeping for a newly received block index."""
+        gi = bisect_right(self.group_starts, seq) - 1
+        g = self.groups[gi]
+        if self.group_missing[gi] > g.parity_blocks:
+            self.group_missing[gi] -= 1
+            if self.group_missing[gi] <= g.parity_blocks:
+                self.groups_ok += 1
+
+    @property
+    def decodable(self) -> bool:
+        return self.groups_ok == len(self.groups)
 
     def snapshot(self) -> IncomingSnapshot:
         return IncomingSnapshot(
@@ -427,7 +452,14 @@ class IncomingFiles:
             if not 1 <= total <= FILE_MAX_BLOCKS:
                 log.info("rejecting stream %s: total_packets %s", tid, total)
                 return
-            stream = _Stream(tid, sender, fec, total, len(block))
+            try:
+                stream = _Stream(tid, sender, fec, total, len(block))
+            except ValueError:
+                log.info(
+                    "rejecting stream %s: total %s is not a valid rsfec "
+                    "geometry", tid, total,
+                )
+                return
             self.streams[key] = stream
             self._evict_old()
         elif fec != stream.fec or total != stream.total or len(block) != stream.block_size:
@@ -442,6 +474,7 @@ class IncomingFiles:
         b = stream.block_size
         stream.buf[seq * b : (seq + 1) * b] = block
         stream.received.add(seq)
+        stream.record(seq)
         stream.last_block_time = time.monotonic()
         if stream.status == INCOMING_FAILED:
             # late blocks revive a failed stream for another sweep attempt
@@ -451,8 +484,12 @@ class IncomingFiles:
             stream.message = "resumed"
         self._peek(stream)
         self._update(stream)
-        if len(stream.received) == stream.total and not stream.attempted:
-            self._attempt(stream, set())
+        # Decode as soon as every group is within its erasure budget, even if
+        # packets are still arriving: with strong FEC the file is provably
+        # complete well before the broadcast ends and can be opened early.
+        if stream.decodable and not stream.attempted:
+            missing = set(range(stream.total)) - stream.received
+            self._attempt(stream, missing)
 
     def sweep(self) -> None:
         """Attempt RS repair on streams that idled out (periodic pump call)."""
@@ -501,6 +538,8 @@ class IncomingFiles:
                 return
             stream.status = INCOMING_COMPLETE
             stream.message = "sha1 verified"
+            if missing:
+                stream.message += f" (repaired {len(missing)} lost blocks)"
             stream.path = path
             stream.name = name
             stream.file_size = unpacked.size
