@@ -72,15 +72,9 @@ class PacketsTab(ctk.CTkFrame):
             bar, values=DIR_FILTERS, width=80, command=lambda _=None: self.rebuild()
         )
         self.dir_filter.pack(side="left", padx=(6, 0))
-        self._hide_chunks_var = tk.BooleanVar(value=False)
-        self.hide_chunks = ctk.CTkSwitch(
-            bar, text="Hide file chunks", width=130, variable=self._hide_chunks_var
-        )
-        self.hide_chunks.pack(side="left", padx=(12, 0))
-        self._hide_chunks_var.trace_add("write", lambda *_: self.rebuild())
         self.autoscroll = ctk.CTkSwitch(bar, text="Auto-scroll", width=100)
         self.autoscroll.select()
-        self.autoscroll.pack(side="left", padx=(8, 0))
+        self.autoscroll.pack(side="left", padx=(12, 0))
         self.clear_btn = ctk.CTkButton(bar, text="Clear", width=70, command=self.clear)
         self.clear_btn.pack(side="right")
         self.count_label = ctk.CTkLabel(
@@ -151,8 +145,6 @@ class PacketsTab(ctk.CTkFrame):
             return False
         df = self.dir_filter.get()
         if df != "All" and row.direction != df:
-            return False
-        if self.hide_chunks.get() and row.kind == "file-chunk":
             return False
         return True
 
