@@ -2,6 +2,7 @@
 name = "m73gui"
 version = "0.1.0"
 description = "Desktop GUI for modem73: chat, broadcast file transfers, channel monitoring"
+license = "MIT"
 requires-python = ">=3.14"
 dependencies = [
     "customtkinter>=6.0.0",
