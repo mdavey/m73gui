@@ -35,7 +35,7 @@ class StatusChip(ctk.CTkLabel):
         super().__init__(
             master,
             text=text,
-            font=FONTS["badge"],
+            font=FONTS["body"],
             text_color=color,
             fg_color="#1b202a",
             border_width=1,
