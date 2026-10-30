@@ -1,0 +1,18 @@
+[project]
+name = "m73gui"
+version = "0.1.0"
+description = "Desktop GUI for modem73: chat, broadcast file transfers, channel monitoring"
+requires-python = ">=3.14"
+dependencies = [
+    "customtkinter>=6.0.0",
+]
+
+[project.scripts]
+m73gui = "m73gui.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/m73gui"]
