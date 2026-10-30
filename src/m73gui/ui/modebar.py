@@ -143,7 +143,8 @@ class ModeRow(ctk.CTkFrame):
         self._apply_visibility()
         self._fire()
 
-    def _fire(self) -> None:
+    def _fire(self, *_args) -> None:
+        # CTkOptionMenu/CTkSegmentedButton pass the selected value to command
         if not self._loading and self.on_change:
             self.on_change()
 
