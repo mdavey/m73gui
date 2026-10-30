@@ -34,7 +34,7 @@ class StatusChip(ctk.CTkLabel):
             master,
             text=text,
             font=FONTS["badge"],
-            text_color="#10131a",
+            text_color="#ffffff",
             fg_color=color,
             corner_radius=8,
             padx=10,
