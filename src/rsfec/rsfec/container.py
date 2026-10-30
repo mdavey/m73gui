@@ -5,6 +5,10 @@ block_size`` long, ready to be sliced into fixed-size transport payloads.
 RS codewords run column-wise across the blocks of each group, so any
 ``parity_blocks`` blocks of a group may be missing; the receiver presents
 them as all-zero blocks (optionally declaring them via ``missing=``).
+Corrupted-but-present blocks are repaired too, as unrecognised symbol errors:
+a block costs 1 of a group's parity budget when declared missing and 2 when
+its corruption must be located by the decoder. Every result is verified
+against the header's SHA-1, so a failed recovery never passes silently.
 """
 
 from __future__ import annotations
@@ -224,26 +228,28 @@ def unpack(stream, *, block_size: int, fec: int, missing=None) -> Unpacked:
         group_erasures = sorted(
             i - g.start_block for i in erasures if g.start_block <= i < group_end
         )
-        if group_erasures:
-            if len(group_erasures) > g.parity_blocks:
-                raise CorruptedError(
-                    f"group at block {g.start_block}: {len(group_erasures)} "
-                    f"blocks missing, at most {g.parity_blocks} recoverable"
+        if len(group_erasures) > g.parity_blocks:
+            raise CorruptedError(
+                f"group at block {g.start_block}: {len(group_erasures)} "
+                f"blocks missing, at most {g.parity_blocks} recoverable"
+            )
+        base = g.start_block * block_size
+        span = group_end * block_size
+        data_stop = (data_pos + g.data_blocks) * block_size
+        for j in range(block_size):
+            column = stream[base + j:span:block_size]
+            try:
+                # Also repairs undeclared corruption: reedsolo fixes declared
+                # erasures plus unknown errors while erasures + 2*errors <= p;
+                # a corrupted block costs exactly one symbol per column.
+                corrected = _codec.decode_data(
+                    column, g.parity_blocks, group_erasures
                 )
-            base = g.start_block * block_size
-            span = group_end * block_size
-            data_stop = (data_pos + g.data_blocks) * block_size
-            for j in range(block_size):
-                column = stream[base + j:span:block_size]
-                try:
-                    corrected = _codec.decode_data(
-                        column, g.parity_blocks, group_erasures
-                    )
-                except reedsolo.ReedSolomonError as exc:
-                    raise CorruptedError(
-                        f"uncorrectable group at block {g.start_block}: {exc}"
-                    ) from None
-                repaired[data_pos * block_size + j:data_stop:block_size] = corrected
+            except reedsolo.ReedSolomonError as exc:
+                raise CorruptedError(
+                    f"uncorrectable group at block {g.start_block}: {exc}"
+                ) from None
+            repaired[data_pos * block_size + j:data_stop:block_size] = corrected
         data_pos += g.data_blocks
 
     payload = bytes(repaired)

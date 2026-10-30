@@ -53,7 +53,10 @@ out.name, out.data, out.sha1_hex, out.size
 ```
 
 - `pack(path, *, block_size, fec)` reads a file; the stored name is its basename.
-- `missing` is optional; omit it and all-zero blocks are treated as losses.
+- `missing` declares blocks that are absent *or* suspected corrupt — the
+  cheap erasure path. Undeclared corruption is still located and corrected
+  when the budget allows (see Limitations). Omit `missing` entirely and
+  all-zero blocks are treated as losses.
 - Raises `rsfec.CorruptedError` when losses exceed parity or integrity checks
   fail, and `rsfec.HeaderError` for malformed input or wrong `block_size`/`fec`.
 - `rsfec.missing_blocks(stream, block_size)` returns the all-zero block indices.
@@ -110,16 +113,23 @@ u8 type | u8 fec_level | u16 sequence | u16 total_packets | uchar[8] desc | ucha
   `total_blocks`; `block_size` is simply the uniform payload length.
 - `block_size` on send = modem max packet payload − 14 (header bytes).
 - The receiver maps packet sequence gaps to `missing=set`, zero-filling those
-  blocks. `desc` can carry an 8-byte callsign ("from: VK3ARD") for instant
-  feedback; the authoritative filename/size come from the recovered header.
+  blocks. A packet that decodes but looks suspect should also go in `missing`
+  (costs the repair budget's cheap 1 instead of 2). `desc` can carry an 8-byte
+  callsign ("from: VK3ARD") for instant feedback; the authoritative
+  filename/size come from the recovered header.
 - u16 `total_packets` caps a transfer at 65535 blocks.
 
 ## Limitations
 
-- **Erasure-only.** A block that arrives corrupted-but-nonzero is not detected
-  as damaged and can silently break recovery — the transport must present
-  errors as *missing* (zero-filled / declared via `missing=`). SHA-1 catches
-  any residual corruption at the end, but cannot pinpoint it.
+- **Erasure + error budget.** Reed–Solomon can both *erase-correct* (you say a
+  block is bad) and *error-correct* (it works out which symbols are bad on its
+  own). One group's `p` parity blocks buy a mixed budget of
+  `missing + 2×corrupted ≤ p`: each declared-missing block costs 1, each
+  undeclared corrupted block costs 2. So a stray corrupt block that the
+  transport didn't flag is still repaired, but two corrupted blocks eat the
+  budget of four missing ones. Declare suspect blocks in `missing=` to spend
+  the cheap rate. If the budget is blown, `CorruptedError` is raised — the
+  SHA-1 and size checks mean a bad recovery is never silently accepted.
 - An intact group decodes without Reed–Solomon work; RS only runs for groups
   that actually lost blocks.
 - Pure-Python `reedsolo` backend: fine for the ~100 KB files this targets

@@ -24,7 +24,10 @@ def decode_data(codeword: bytes, nsym: int, erase_pos: list[int]) -> bytes:
     """Corrected data portion of a column codeword at known erasure positions.
 
     codeword is the full (data + parity) shortened codeword; erase_pos indexes
-    it directly. Raises reedsolo.ReedSolomonError when uncorrectable.
+    it directly. reedsolo also repairs UNDECLARED symbol errors while
+    erasures + 2*errors <= nsym (default only_erasures=False), so a corrupted
+    block whose position was never declared is still correctable. Raises
+    reedsolo.ReedSolomonError when the combined budget is exceeded.
     """
     decoded = _codec(nsym).decode(bytes(codeword), erase_pos=list(erase_pos))
     data = decoded[0] if isinstance(decoded, tuple) else decoded

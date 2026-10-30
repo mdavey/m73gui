@@ -50,6 +50,17 @@ class ReedsoloGuard(unittest.TestCase):
         with self.assertRaises(reedsolo.ReedSolomonError):
             self.codec.decode(cw, erase_pos=pos)
 
+    def test_declared_erasures_plus_undeclared_errors(self):
+        # reedsolo corrects while erasures + 2*errors <= nsym
+        cw = bytearray(self.encoded)
+        erase = [0, 1]
+        for p in erase:
+            cw[p] = 0
+        for p in (20, 21):  # corrupted, never declared
+            cw[p] ^= 0xA5
+        out = self.codec.decode(cw, erase_pos=erase)
+        self.assertEqual(bytes(out[0]), self.data)
+
     def test_nsym_extremes_used_by_fec_levels(self):
         for nsym, d in ((1, 223), (32, 223), (128, 127)):
             codec = reedsolo.RSCodec(nsym)

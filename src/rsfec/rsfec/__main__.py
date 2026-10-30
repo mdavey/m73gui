@@ -36,7 +36,9 @@ def _build_parser() -> argparse.ArgumentParser:
     p_unpack.add_argument("-d", "--dest-dir", type=Path, default=Path("."))
     p_unpack.add_argument("--missing", type=int, nargs="*", default=None,
                           metavar="BLOCK",
-                          help="block indices known to be absent")
+                          help="block indices absent or suspect (declared "
+                               "as erasures; undeclared corruption costs "
+                               "double the repair budget)")
     p_unpack.add_argument("-v", "--verbose", action="store_true")
 
     return parser

@@ -134,12 +134,35 @@ class Recovery(unittest.TestCase):
         out = rsfec.unpack(stream, block_size=128, fec=2, missing={1})
         self.assertEqual(out.data, content)
 
-    def test_corrupted_block_undeclared_fails_detection(self):
+    def test_single_corrupted_block_undeclared_recovers(self):
         content = make_content(2000)
         res = rsfec.pack_bytes(content, name="t.bin", block_size=128, fec=2)
         stream = corrupt_block(res.stream, 128, 1)
+        out = rsfec.unpack(stream, block_size=128, fec=2)
+        self.assertEqual(out.data, content)
+        self.assertEqual(out.sha1_hex, hashlib.sha1(content).hexdigest())
+
+    def test_budget_missing_costs_one_corruption_costs_two(self):
+        content = make_content(2000)
+        res = rsfec.pack_bytes(content, name="t.bin", block_size=128, fec=2)  # p=4
+        # 1 missing (costs 1) + 1 corrupt (costs 2) = 3 <= p: recovers
+        stream = drop(corrupt_block(res.stream, 128, 2), 128, [5])
+        self.assertEqual(rsfec.unpack(stream, block_size=128, fec=2).data,
+                         content)
+        # 2 missing (2) + 2 corrupt (4) = 6 > p: fails cleanly
+        stream = corrupt_block(corrupt_block(drop(res.stream, 128, [0, 1]),
+                                             128, 2), 128, 3)
         with self.assertRaises(rsfec.CorruptedError):
             rsfec.unpack(stream, block_size=128, fec=2)
+
+    def test_auto_detected_zero_plus_undeclared_corruption(self):
+        content = make_content(2000, seed=3)
+        res = rsfec.pack_bytes(content, name="t.bin", block_size=128, fec=3)
+        # missing=None: the dropped block is auto-detected as an erasure and
+        # the untouched corrupted block is located by the decoder itself
+        stream = corrupt_block(drop(res.stream, 128, [4]), 128, 2)
+        out = rsfec.unpack(stream, block_size=128, fec=3)
+        self.assertEqual(out.data, content)
 
     def test_genuine_zero_block_plus_missing(self):
         # name "t.bin" -> header 51; data offset 205 makes stream block 2
