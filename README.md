@@ -19,7 +19,7 @@ next to the radio, or across the house from a machine hosting the audio.
 
 - **Chat** — free-text messages broadcast to everyone on the channel, with a
   scrolling history that is rebuilt from modem73's frame history after
-  reconnects. A Broadcast mode card at the top picks the transmit mode
+  reconnects. A Tx Settings card at the top picks the transmit mode
   (OFDM / MFSK / ROBUST); the choice is pushed to the modem when you press
   Send.
 - **Files** — pick a file (up to 1 MiB), choose a mode and a Reed–Solomon FEC
@@ -98,7 +98,7 @@ Everything m73gui keeps lives under `~/.m73gui/`:
 - **Transfers are local.** Incoming files land in
   `~/.m73gui/received/<yyyy-mm-dd>/` with duplicate names de-duplicated
   automatically.
-- **Mode edits apply on Send.** The Chat and Files Broadcast mode cards are
+- **Mode edits apply on Send.** The Chat and Files Tx Settings cards are
   independent intentions; pressing Send pushes the mode to the modem first,
   then transmits on it. Chatting while a file transfer runs defers the chat
   tab's mode (changing it mid-broadcast would resize frames under the running

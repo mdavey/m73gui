@@ -33,12 +33,24 @@ class FilesTab(ctk.CTkFrame):
         outer = ctk.CTkFrame(self, fg_color=BG)
         outer.pack(fill="both", expand=True, padx=6, pady=6)
 
-        # ---- broadcast mode (own card, apply on Send) ----
-        mode_card = Card(outer, "Broadcast mode")
+        # ---- tx settings (mode + file FEC, apply on Send) ----
+        mode_card = Card(outer, "Tx Settings")
         mode_card.pack(fill="x", pady=4)
         self.mode_row = ModeRow(mode_card, on_change=self._mode_changed,
                                 label="")
-        self.mode_row.pack(fill="x", padx=12, pady=8)
+        self.mode_row.pack(fill="x", padx=12, pady=(8, 2))
+        fec_row = ctk.CTkFrame(mode_card, fg_color="transparent")
+        fec_row.pack(fill="x", padx=12, pady=(0, 8))
+        ctk.CTkLabel(fec_row, text="Extra File Protection", font=FONTS["small"],
+                     text_color=FG_DIM).pack(side="left")
+        self.fec_box = ctk.CTkComboBox(
+            fec_row, values=list(FEC_CHOICES), width=150, state="readonly",
+            command=self._refresh_estimate_fec,
+        )
+        self.fec_box.set(self._fec_label(
+            self.app.gui_settings.get("fec_level", 2)
+        ))
+        self.fec_box.pack(side="left", padx=(8, 0))
 
         # ---- outgoing ----
         out_card = Card(outer, "Outgoing broadcast")
@@ -52,25 +64,6 @@ class FilesTab(ctk.CTkFrame):
             row1, text="no file selected", font=FONTS["small"], text_color=FG_DIM
         )
         self.file_label.pack(side="left", padx=10)
-        ctk.CTkLabel(row1, text="FEC", font=FONTS["small"],
-                     text_color=FG_DIM).pack(side="left", padx=(10, 2))
-        self.fec_box = ctk.CTkComboBox(
-            row1, values=list(FEC_CHOICES), width=150, state="readonly",
-            command=self._refresh_estimate_fec,
-        )
-        self.fec_box.set(self._fec_label(
-            self.app.gui_settings.get("fec_level", 2)
-        ))
-        self.fec_box.pack(side="left")
-
-        ctk.CTkLabel(
-            out_card,
-            text="Best-effort broadcast with FEC: lost packets are repaired by "
-            "the receiver. No delivery confirmation; large files take airtime.",
-            font=FONTS["small"],
-            text_color=COL_WARN,
-            anchor="w",
-        ).pack(fill="x", padx=12)
 
         row2 = ctk.CTkFrame(out_card, fg_color="transparent")
         row2.pack(fill="x", padx=12, pady=(2, 10))

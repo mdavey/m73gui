@@ -17,7 +17,7 @@ class ChatTab(ctk.CTkFrame):
         self._lines = 0
 
         # ---- broadcast mode (own card, apply on Send) ----
-        mode_card = Card(self, "Broadcast mode")
+        mode_card = Card(self, "Tx Settings")
         mode_card.pack(fill="x", padx=6, pady=(6, 0))
         self.mode_row = ModeRow(mode_card, on_change=self._mode_changed,
                                 label="")
