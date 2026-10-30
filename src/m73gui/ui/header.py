@@ -23,7 +23,7 @@ class Header(ctk.CTkFrame):
         )
         self.callsign = StatusChip(left, "?", COL_IDLE)
         self.callsign.pack(side="left", padx=(8, 0))
-        self.mode = StatusChip(left, "—", "#4a5568")
+        self.mode = StatusChip(left, "—", "#9aa4b2")
         self.mode.pack(side="left", padx=(6, 0))
         self.payload = ctk.CTkLabel(
             left, text="payload —", font=FONTS["small"], text_color=FG_DIM
@@ -72,7 +72,7 @@ class Header(ctk.CTkFrame):
 
     def update(self, state) -> None:
         self.callsign.set(state.callsign, COL_IDLE if state.control_connected else COL_OFF)
-        self.mode.set(state.mode_label(), "#4a5568")
+        self.mode.set(state.mode_label(), "#9aa4b2")
         ps = state.payload_size
         self.payload.configure(text=f"payload {ps} B" if ps else "payload —")
 

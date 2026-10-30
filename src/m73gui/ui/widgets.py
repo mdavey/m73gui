@@ -26,7 +26,9 @@ class Card(ctk.CTkFrame):
 
 
 class StatusChip(ctk.CTkLabel):
-    """Small rounded label whose color conveys state."""
+    """Small bordered label whose color conveys state (dark badge style:
+    colored text and outline on a dark chip, which contrasts far better
+    with mid-tone status colors than filled pills do)."""
 
     def __init__(self, master, text: str = "—", color: str = FG_DIM, **kwargs) -> None:
         self._color = color
@@ -34,8 +36,10 @@ class StatusChip(ctk.CTkLabel):
             master,
             text=text,
             font=FONTS["badge"],
-            text_color="#ffffff",
-            fg_color=color,
+            text_color=color,
+            fg_color="#1b202a",
+            border_width=1,
+            border_color=color,
             corner_radius=8,
             padx=10,
             pady=3,
@@ -47,7 +51,7 @@ class StatusChip(ctk.CTkLabel):
             self.configure(text=text)
         if color != self._color:
             self._color = color
-            self.configure(fg_color=color)
+            self.configure(text_color=color, border_color=color)
 
 
 class LabeledEntry(ctk.CTkFrame):
