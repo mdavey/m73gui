@@ -91,6 +91,10 @@ class ModeRow(ctk.CTkFrame):
             1: ("mfsk_mode",),
             2: ("robust_mode",),
         }
+        # persistent slot for the owning tab's extra controls; menus are
+        # re-packed before it so it always stays rightmost
+        self.trailing = ctk.CTkFrame(self, fg_color="transparent")
+        self.trailing.pack(side="left")
         self._apply_visibility()
 
     # -- state ---------------------------------------------------------------
@@ -154,6 +158,6 @@ class ModeRow(ctk.CTkFrame):
             for name in names:
                 box = self.controls[name][0]
                 if mtype == want:
-                    box.pack(side="left", padx=(4, 0))
+                    box.pack(side="left", padx=(4, 0), before=self.trailing)
                 else:
                     box.pack_forget()

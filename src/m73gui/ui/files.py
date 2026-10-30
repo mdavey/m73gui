@@ -38,19 +38,19 @@ class FilesTab(ctk.CTkFrame):
         mode_card.pack(fill="x", pady=4)
         self.mode_row = ModeRow(mode_card, on_change=self._mode_changed,
                                 label="")
-        self.mode_row.pack(fill="x", padx=12, pady=(8, 2))
-        fec_row = ctk.CTkFrame(mode_card, fg_color="transparent")
-        fec_row.pack(fill="x", padx=12, pady=(0, 8))
-        ctk.CTkLabel(fec_row, text="Extra File Protection", font=FONTS["small"],
-                     text_color=FG_DIM).pack(side="left")
-        self.fec_box = ctk.CTkComboBox(
-            fec_row, values=list(FEC_CHOICES), width=150, state="readonly",
-            command=self._refresh_estimate_fec,
+        self.mode_row.pack(fill="x", padx=12, pady=8)
+        trailing = self.mode_row.trailing
+        ctk.CTkLabel(trailing, text="Extra File Protection",
+                     font=FONTS["small"], text_color=FG_DIM).pack(
+            side="left", padx=(12, 6))
+        self.fec_box = ctk.CTkOptionMenu(
+            trailing, values=list(FEC_CHOICES), width=150,
+            font=FONTS["small"], command=self._refresh_estimate_fec,
         )
         self.fec_box.set(self._fec_label(
             self.app.gui_settings.get("fec_level", 2)
         ))
-        self.fec_box.pack(side="left", padx=(8, 0))
+        self.fec_box.pack(side="left")
 
         # ---- outgoing ----
         out_card = Card(outer, "Outgoing broadcast")
