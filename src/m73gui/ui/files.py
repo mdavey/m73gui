@@ -226,8 +226,11 @@ class FilesTab(ctk.CTkFrame):
         self.progress.set(snap.fraction)
         text = (
             f"{snap.filename}: {snap.sent_blocks}/{snap.total_blocks or 0} blocks "
-            f"({protocol.human_bytes(snap.sent_bytes)} queued) — {snap.message}"
+            f"({protocol.human_bytes(snap.sent_bytes)} queued)"
         )
+        # progress notes and failure reasons matter; the success blurb does not
+        if snap.status != TX_SENT and snap.message:
+            text += f" — {snap.message}"
         color = FG_DIM
         if snap.status == TX_SENT:
             color = "#3fb950"
