@@ -109,7 +109,7 @@ class ChannelTab(ctk.CTkFrame):
         self.clients_row.pack(fill="x", padx=12, pady=(2, 8))
 
         csma = Card(right, "CSMA configuration")
-        csma.pack(fill="x", pady=(0, 3))
+        csma.pack(fill="x", pady=(6, 3))
         self.csma_label = ctk.CTkLabel(
             csma, text="—", font=FONTS["mono_small"], text_color=FG_DIM, anchor="w",
             justify="left",
