@@ -20,25 +20,15 @@ CALLSIGN_RE = re.compile(r"^[A-Z0-9/]{1,9}$")
 
 BAND_OPTIONS = [("HF", "0"), ("VHF/UHF", "1")]
 
-MODES_GUIDE = """OFDM — fastest family (~0.8-13 kbit/s in the same 2400 Hz).
-For clean channels: VHF/UHF FM, line-of-sight. Practical picks: QPSK or
-8PSK at rate 3/4 or 5/6, normal or long frames. QAM256+ needs a
-near-perfect channel and rarely works.
+MODES_GUIDE = """OFDM — fastest family (~0.8-13 kbit/s in the same 2400 Hz). For clean channels: VHF/UHF FM, line-of-sight. Practical picks: QPSK or 8PSK at rate 3/4 or 5/6, normal or long frames. QAM256+ needs a near-perfect channel and rarely works.
 
-ROBUST (RDM) — slowest, toughest; built for fading HF paths (40/80 m
-NVIS). From ~1150 bps (RDM-1200) down to ~150 bps (RDMN-150).
-"N" = narrow 600 Hz variant, "S" = short frames (170 B payload vs 510 B).
+ROBUST (RDM) — slowest, toughest; built for fading HF paths (40/80 m NVIS). From ~1150 bps (RDM-1200) down to ~150 bps (RDMN-150). "N" = narrow 600 Hz variant, "S" = short frames (170 B payload vs 510 B).
 
-MFSK — non-coherent weak-signal / backup mode; fixed ~4.4 s frames,
-tolerant of poor sync. MFSK-16 is the common all-rounder.
+MFSK — non-coherent weak-signal / backup mode; fixed ~4.4 s frames, tolerant of poor sync. MFSK-16 is the common all-rounder.
 
-Code rate: the first number is the share of what's transmitted that
-carries data. 5/6 means ~83% data, the remaining 1/6 is FEC; 1/2 means
-half the airtime is error correction (reliable, half speed).
+Code rate: the first number is the share of what's transmitted that carries data. 5/6 means ~83% data, the remaining 1/6 is FEC; 1/2 means half the airtime is error correction (reliable, half speed).
 
-File FEC (Files tab, L1-L4) is extra Reed-Solomon parity on top of the
-code rate; e.g. L2 adds ~20% airtime and repairs roughly 1 lost packet
-in 6."""
+File FEC (Files tab, L1-L4) is extra Reed-Solomon parity on top of the code rate; e.g. L2 adds ~20% airtime and repairs roughly 1 lost packet in 6."""
 
 
 class Field:
@@ -201,8 +191,8 @@ class SettingsTab(ctk.CTkFrame):
         guide_card = Card(scroll, "Modem modes guide")
         guide_card.pack(fill="x", pady=3)
         guide = ctk.CTkTextbox(
-            guide_card, font=FONTS["mono_small"], fg_color="#14171d",
-            text_color=FG, height=260, wrap="word",
+            guide_card, font=FONTS["body"], fg_color="#14171d",
+            text_color=FG, height=300, wrap="word",
         )
         guide.pack(fill="x", padx=12, pady=6)
         guide.insert("1.0", MODES_GUIDE)
