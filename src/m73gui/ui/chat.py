@@ -22,13 +22,8 @@ class ChatTab(ctk.CTkFrame):
 
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 10))
-        self.hint = ctk.CTkLabel(
-            row, text="broadcast, no addressing", font=FONTS["small"],
-            text_color=FG_DIM,
-        )
-        self.hint.pack(side="left")
         self.part_info = ctk.CTkLabel(row, text="", font=FONTS["small"], text_color=FG_DIM)
-        self.part_info.pack(side="left", padx=10)
+        self.part_info.pack(side="left")
         self.clear_btn = ctk.CTkButton(row, text="Clear", width=70, command=self.clear)
         self.clear_btn.pack(side="right")
         self.send_btn = ctk.CTkButton(row, text="Send", width=90, command=self._send)
