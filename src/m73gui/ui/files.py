@@ -19,6 +19,7 @@ FEC_CHOICES = {
     "L4 · +100% parity": 4,
 }
 from . import theme
+from .modebar import ModeRow, mode_differs
 from .theme import BG, FG, FG_DIM, FONTS
 from .widgets import Card
 
@@ -35,6 +36,9 @@ class FilesTab(ctk.CTkFrame):
         # ---- outgoing ----
         out_card = Card(outer, "Outgoing broadcast")
         out_card.pack(fill="x", pady=4)
+        self.mode_row = ModeRow(out_card, on_change=self._mode_changed,
+                                label="Broadcast mode")
+        self.mode_row.pack(fill="x", padx=12, pady=(6, 0))
         row1 = ctk.CTkFrame(out_card, fg_color="transparent")
         row1.pack(fill="x", padx=12, pady=(6, 2))
         self.pick_btn = ctk.CTkButton(row1, text="Choose file…", width=120,
@@ -48,9 +52,11 @@ class FilesTab(ctk.CTkFrame):
                      text_color=FG_DIM).pack(side="left", padx=(10, 2))
         self.fec_box = ctk.CTkComboBox(
             row1, values=list(FEC_CHOICES), width=150, state="readonly",
-            command=self._refresh_estimate,
+            command=self._refresh_estimate_fec,
         )
-        self.fec_box.set("L2 · +20% parity")
+        self.fec_box.set(self._fec_label(
+            self.app.gui_settings.get("fec_level", 2)
+        ))
         self.fec_box.pack(side="left")
 
         ctk.CTkLabel(
@@ -70,6 +76,9 @@ class FilesTab(ctk.CTkFrame):
         self.cancel_btn = ctk.CTkButton(row2, text="Cancel", width=90,
                                         fg_color="#6e3b3b", command=self._cancel)
         self.cancel_btn.pack(side="left", padx=6)
+        self.mode_hint = ctk.CTkLabel(row2, text="", font=FONTS["small"],
+                                      text_color=FG_DIM)
+        self.mode_hint.pack(side="left", padx=(10, 0))
         self.progress = ctk.CTkProgressBar(row2)
         self.progress.set(0)
         self.progress.pack(side="left", fill="x", expand=True, padx=(10, 0))
@@ -118,8 +127,11 @@ class FilesTab(ctk.CTkFrame):
         grow = ctk.CTkFrame(set_card, fg_color="transparent")
         grow.pack(fill="x", padx=12, pady=8)
         self.accept_self = ctk.CTkCheckBox(
-            grow, text="Accept my own echoed transfers (loopback test)"
+            grow, text="Accept my own echoed transfers (loopback test)",
+            command=self._persist_accept_self,
         )
+        if self.app.gui_settings.get("accept_self"):
+            self.accept_self.select()
         self.accept_self.pack(side="left")
         self.dir_label = ctk.CTkLabel(
             set_card,
@@ -132,8 +144,37 @@ class FilesTab(ctk.CTkFrame):
 
     # -- outgoing -----------------------------------------------------------
 
+    @staticmethod
+    def _fec_label(level) -> str:
+        for label, value in FEC_CHOICES.items():
+            if value == level:
+                return label
+        return "L2 · +20% parity"
+
+    def _persist_accept_self(self) -> None:
+        self.app.persist_gui(accept_self=bool(self.accept_self.get()))
+
+    def _mode_changed(self) -> None:
+        self.app.persist_gui(files_mode=self.mode_row.fields())
+        self.on_live_config()
+
+    def on_live_config(self) -> None:
+        pending = mode_differs(self.mode_row.fields(), self.app.state.config)
+        self.mode_hint.configure(
+            text="applies on Send" if pending else ""
+        )
+        self._refresh_estimate()
+
+    def broadcast_config(self) -> dict:
+        """Live config with the pending row's mode fields merged over it."""
+        return {**self.app.state.config, **self.mode_row.fields()}
+
     def selected_fec(self) -> int:
         return FEC_CHOICES.get(self.fec_box.get(), 2)
+
+    def _refresh_estimate_fec(self, *_args) -> None:
+        self.app.persist_gui(fec_level=self.selected_fec())
+        self._refresh_estimate()
 
     def _pick(self) -> None:
         from tkinter import filedialog
@@ -155,16 +196,18 @@ class FilesTab(ctk.CTkFrame):
             self.file_label.configure(text=f"error: {exc}")
             return
         text = f"{os.path.basename(self.selected_path)}  ({protocol.human_bytes(size)})"
-        block = self.app.block_size()
+        cfg = self.broadcast_config()
+        try:
+            block = protocol.block_size_for(phytime.payload_bytes_for(cfg))
+        except protocol.ProtocolError:
+            block = 0
         if block and size:
             fec = self.selected_fec()
             total = transfers.blocks_needed(
                 os.path.basename(self.selected_path), size, block, fec
             )
             text += f"  ·  {total} blocks × {block} B · FEC L{fec}"
-            est = phytime.estimate_transfer_seconds(
-                self.app.state.config, total
-            )
+            est = phytime.estimate_transfer_seconds(cfg, total)
             text += f"  ·  ~{phytime.human_duration(est)} airtime"
             if block < transfers.SMALL_BLOCK_WARN:
                 text += "  ·  header-heavy blocks on this mode"
@@ -173,19 +216,14 @@ class FilesTab(ctk.CTkFrame):
             text += f"  ·  unusual file type ({bad})"
         self.file_label.configure(text=text)
 
-    def clear_selection(self) -> None:
-        """Forget the picked file and its block math (e.g. after a mode change
-        altered the frame size)."""
-        self.selected_path = None
-        self.file_label.configure(text="no file selected")
-        self.progress.set(0)
-        self.tx_status.configure(text="", text_color=FG_DIM)
-
     def _send(self) -> None:
         if not self.selected_path:
             self.app.notify("Pick a file first", level="warn")
             return
-        err = self.app.send_file(self.selected_path, fec=self.selected_fec())
+        err = self.app.send_file(
+            self.selected_path, fec=self.selected_fec(),
+            mode_fields=self.mode_row.fields(),
+        )
         if err:
             self.app.notify(err, level="error")
 

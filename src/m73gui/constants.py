@@ -80,6 +80,8 @@ CODE_RATES = ["1/2", "2/3", "3/4", "5/6", "1/4", "1/2x2", "1/4x2"]
 FRAME_SIZE_NAMES = {0: "short", 1: "normal", 2: "long"}
 FRAME_SIZE_INDEX = {"short": 0, "normal": 1, "long": 2, "micro": 3}
 
+MODEM_TYPES = ["OFDM", "MFSK", "ROBUST"]
+
 MFSK_MODE_NAMES = ["MFSK-8", "MFSK-16", "MFSK-32", "MFSK-32R"]
 
 ROBUST_MODE_NAMES = [

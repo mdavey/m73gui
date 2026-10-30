@@ -5,6 +5,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from ..constants import CHAT_TRANSCRIPT_MAX_LINES
+from .modebar import ModeRow, mode_differs
 from .theme import BG, FG, FG_DIM, FONTS
 
 
@@ -20,10 +21,16 @@ class ChatTab(ctk.CTkFrame):
         )
         self.transcript.pack(fill="both", expand=True, padx=10, pady=(10, 4))
 
+        self.mode_row = ModeRow(self, on_change=self._mode_changed)
+        self.mode_row.pack(fill="x", padx=10, pady=(4, 2))
+
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 10))
         self.part_info = ctk.CTkLabel(row, text="", font=FONTS["small"], text_color=FG_DIM)
         self.part_info.pack(side="left")
+        self.mode_hint = ctk.CTkLabel(row, text="", font=FONTS["small"],
+                                      text_color=FG_DIM)
+        self.mode_hint.pack(side="left", padx=(10, 0))
         self.clear_btn = ctk.CTkButton(row, text="Clear", width=70, command=self.clear)
         self.clear_btn.pack(side="right")
         self.send_btn = ctk.CTkButton(row, text="Send", width=90, command=self._send)
@@ -58,6 +65,16 @@ class ChatTab(ctk.CTkFrame):
         self.transcript.delete("1.0", "end")
         self.transcript.configure(state="disabled")
         self._lines = 0
+
+    def _mode_changed(self) -> None:
+        self.app.persist_gui(chat_mode=self.mode_row.fields())
+        self.on_live_config()
+
+    def on_live_config(self) -> None:
+        pending = mode_differs(self.mode_row.fields(), self.app.state.config)
+        self.mode_hint.configure(
+            text="mode change applies on Send" if pending else ""
+        )
 
     def set_connected(self, connected: bool) -> None:
         state = "normal" if connected else "disabled"

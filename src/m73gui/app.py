@@ -37,6 +37,7 @@ from .ui.channel import ChannelTab
 from .ui.chat import ChatTab
 from .ui.files import FilesTab
 from .ui.header import Header
+from .ui.modebar import MODE_FIELDS, changed_mode_fields, mode_differs
 from .ui.packets import PacketsTab
 from .ui.settings import SettingsTab
 from . import __version__
@@ -91,6 +92,14 @@ class App:
         )
 
         self._build_ui()
+
+        # tab mode rows carry the user's intent, not live modem state
+        self._mode_adopted = False
+        stored = self.gui_settings
+        if isinstance(stored.get("chat_mode"), dict):
+            self.chat_tab.mode_row.set_from_config(stored["chat_mode"])
+        if isinstance(stored.get("files_mode"), dict):
+            self.files_tab.mode_row.set_from_config(stored["files_mode"])
 
         self.control.start()
         self.kiss.start()
@@ -152,21 +161,51 @@ class App:
 
     # -------------------------------------------------------- app API for UI
 
-    def block_size(self) -> int:
-        ps = self.state.payload_size
-        if not ps:
-            return 0
-        try:
-            return protocol.block_size_for(ps)
-        except protocol.ProtocolError:
-            return 0
+    def persist_gui(self, **updates) -> None:
+        self.gui_settings.update(updates)
+        userdirs.save_settings(self.gui_settings)
+
+    def apply_mode_then(self, fields: dict, then) -> None:
+        """Push pending mode fields to the modem when they differ, then run
+        then(cfg) on the Tk thread. Callers must not do this while a file
+        transfer runs: the payload size would change under the stream."""
+
+        def work():
+            current = self.state.config or self.control.get_config()
+            changed = changed_mode_fields(fields, current)
+            if changed:
+                self.control.set_config(changed)
+                return self.control.get_config()
+            return current
+
+        def done(cfg, error):
+            if error:
+                self.notify(f"mode change failed: {error}", level="error")
+                return
+            if cfg and cfg is not self.state.config:
+                self._on_config(cfg)
+            then(cfg or self.state.config)
+
+        self.run_async(work, done)
 
     def send_chat(self, text: str) -> None:
         callsign = self.state.config.get("callsign")
         if not callsign:
             self.notify("callsign not loaded yet (control offline?)", level="error")
             return
-        ps = self.state.payload_size or 512
+        fields = self.chat_tab.mode_row.fields()
+        if self.sender.busy():
+            # applying mid-broadcast would resize frames under the stream
+            if mode_differs(fields, self.state.config):
+                self.notify("mode change deferred: file transfer in progress",
+                            level="warn")
+            self._send_chat_frames(text)
+            return
+        self.apply_mode_then(fields, lambda cfg: self._send_chat_frames(text))
+
+    def _send_chat_frames(self, text: str) -> None:
+        callsign = self.state.config.get("callsign")
+        ps = self.state.config.get("payload_size") or 512
         tid = protocol.new_transfer_id()
         try:
             frames = protocol.make_chat_frames(callsign, text, tid, ps)
@@ -186,12 +225,26 @@ class App:
         else:
             self.notify(f"queued {len(frames)} chat part(s) for broadcast")
 
-    def send_file(self, path: str, fec: int = 2) -> str | None:
+    def send_file(self, path: str, fec: int = 2,
+                  mode_fields: dict | None = None) -> str | None:
         if not self.kiss.connected:
             return "KISS link is down; cannot transfer files"
         if not self.control.connected:
             return "control link is down; pacing and settings are unavailable"
-        return self.sender.start(path, fec=fec)
+        if not mode_fields:
+            self._start_file(path, fec)
+            return None
+        # start only after the pending mode landed: the sender reads the new
+        # payload size from get_config when it packs
+        self.apply_mode_then(
+            mode_fields, lambda cfg: self._start_file(path, fec)
+        )
+        return None
+
+    def _start_file(self, path: str, fec: int) -> None:
+        err = self.sender.start(path, fec=fec)
+        if err:
+            self.notify(err, level="error")
 
     def cancel_file(self) -> None:
         self.sender.cancel()
@@ -216,8 +269,7 @@ class App:
             self.settings_tab.on_apply_result(False, f"apply failed: {error}")
         else:
             self.settings_tab.on_apply_result(True, str(value))
-            # frame sizes may have changed; stale block math is misleading
-            self.files_tab.clear_selection()
+            self.files_tab.on_live_config()
 
     def refresh_settings(self) -> None:
         def work():
@@ -403,6 +455,24 @@ class App:
         self.header.update(self.state)
         self.settings_tab.load(cfg)
         self.channel_tab.update(self.state)
+        if not self._mode_adopted and cfg:
+            self._adopt_mode_defaults(cfg)
+        self.chat_tab.on_live_config()
+        self.files_tab.on_live_config()
+
+    def _adopt_mode_defaults(self, cfg: dict) -> None:
+        """First live config: a tab with no stored intent adopts the modem's
+        current mode, so the rows start from reality, not widget defaults."""
+        self._mode_adopted = True
+        live = {k: cfg[k] for k in MODE_FIELDS if cfg.get(k) is not None}
+        if "modem_type" not in live:
+            return
+        for key, tab in (("chat_mode", self.chat_tab),
+                         ("files_mode", self.files_tab)):
+            if isinstance(self.gui_settings.get(key), dict):
+                continue
+            self.persist_gui(**{key: live})
+            tab.mode_row.set_from_config(live)
 
     def _note_link_decode(self, frame: dict) -> None:
         """Feed per-decode SNR/BER into the channel tab's link charts."""
