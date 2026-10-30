@@ -61,8 +61,9 @@ class ModeRow(ctk.CTkFrame):
         self.on_change = on_change
         self._loading = False
 
-        ctk.CTkLabel(self, text=label, font=FONTS["small"],
-                     text_color=FG_DIM).pack(side="left", padx=(0, 6))
+        if label:
+            ctk.CTkLabel(self, text=label, font=FONTS["small"],
+                         text_color=FG_DIM).pack(side="left", padx=(0, 6))
         self.seg = ctk.CTkSegmentedButton(
             self, values=list(MODEM_TYPES), width=180,
             command=self._on_modem_type,

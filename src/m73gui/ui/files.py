@@ -19,7 +19,7 @@ FEC_CHOICES = {
     "L4 · +100% parity": 4,
 }
 from . import theme
-from .modebar import ModeRow, mode_differs
+from .modebar import ModeRow
 from .theme import BG, FG, FG_DIM, FONTS
 from .widgets import Card
 
@@ -33,12 +33,16 @@ class FilesTab(ctk.CTkFrame):
         outer = ctk.CTkFrame(self, fg_color=BG)
         outer.pack(fill="both", expand=True, padx=6, pady=6)
 
+        # ---- broadcast mode (own card, apply on Send) ----
+        mode_card = Card(outer, "Broadcast mode")
+        mode_card.pack(fill="x", pady=4)
+        self.mode_row = ModeRow(mode_card, on_change=self._mode_changed,
+                                label="")
+        self.mode_row.pack(fill="x", padx=12, pady=8)
+
         # ---- outgoing ----
         out_card = Card(outer, "Outgoing broadcast")
         out_card.pack(fill="x", pady=4)
-        self.mode_row = ModeRow(out_card, on_change=self._mode_changed,
-                                label="Broadcast mode")
-        self.mode_row.pack(fill="x", padx=12, pady=(6, 0))
         row1 = ctk.CTkFrame(out_card, fg_color="transparent")
         row1.pack(fill="x", padx=12, pady=(6, 2))
         self.pick_btn = ctk.CTkButton(row1, text="Choose file…", width=120,
@@ -76,9 +80,6 @@ class FilesTab(ctk.CTkFrame):
         self.cancel_btn = ctk.CTkButton(row2, text="Cancel", width=90,
                                         fg_color="#6e3b3b", command=self._cancel)
         self.cancel_btn.pack(side="left", padx=6)
-        self.mode_hint = ctk.CTkLabel(row2, text="", font=FONTS["small"],
-                                      text_color=FG_DIM)
-        self.mode_hint.pack(side="left", padx=(10, 0))
         self.progress = ctk.CTkProgressBar(row2)
         self.progress.set(0)
         self.progress.pack(side="left", fill="x", expand=True, padx=(10, 0))
@@ -159,10 +160,6 @@ class FilesTab(ctk.CTkFrame):
         self.on_live_config()
 
     def on_live_config(self) -> None:
-        pending = mode_differs(self.mode_row.fields(), self.app.state.config)
-        self.mode_hint.configure(
-            text="applies on Send" if pending else ""
-        )
         self._refresh_estimate()
 
     def broadcast_config(self) -> dict:

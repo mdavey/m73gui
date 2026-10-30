@@ -457,7 +457,6 @@ class App:
         self.channel_tab.update(self.state)
         if not self._mode_adopted and cfg:
             self._adopt_mode_defaults(cfg)
-        self.chat_tab.on_live_config()
         self.files_tab.on_live_config()
 
     def _adopt_mode_defaults(self, cfg: dict) -> None:
