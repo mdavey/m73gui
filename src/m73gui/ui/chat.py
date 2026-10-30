@@ -6,7 +6,7 @@ import customtkinter as ctk
 
 from ..constants import CHAT_TRANSCRIPT_MAX_LINES
 from .modebar import ModeRow
-from .theme import BG, FG, FG_DIM, FONTS
+from .theme import BG, FG, FONTS
 from .widgets import Card
 
 
@@ -31,8 +31,6 @@ class ChatTab(ctk.CTkFrame):
 
         row = ctk.CTkFrame(self, fg_color="transparent")
         row.pack(fill="x", padx=10, pady=(0, 10))
-        self.part_info = ctk.CTkLabel(row, text="", font=FONTS["small"], text_color=FG_DIM)
-        self.part_info.pack(side="left")
         self.clear_btn = ctk.CTkButton(row, text="Clear", width=70, command=self.clear)
         self.clear_btn.pack(side="right")
         self.send_btn = ctk.CTkButton(row, text="Send", width=90, command=self._send)
@@ -58,9 +56,6 @@ class ChatTab(ctk.CTkFrame):
             self._lines = CHAT_TRANSCRIPT_MAX_LINES
         self.transcript.see("end")
         self.transcript.configure(state="disabled")
-
-    def set_part_info(self, text: str) -> None:
-        self.part_info.configure(text=text)
 
     def clear(self) -> None:
         self.transcript.configure(state="normal")

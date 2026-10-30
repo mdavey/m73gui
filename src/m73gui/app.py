@@ -216,9 +216,6 @@ class App:
         sent = sum(1 for frame in frames if self._send_payload(frame))
         stamp = time.strftime("%H:%M:%S")
         self.chat_tab.add_line(f"[{stamp}] {callsign}: {text}")
-        self.chat_tab.set_part_info(
-            f"broadcast · {len(text)} chars · {len(frames)} part(s)"
-        )
         if sent < len(frames):
             self.notify(f"KISS down: only {sent}/{len(frames)} parts queued",
                         level="error")
