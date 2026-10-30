@@ -43,7 +43,7 @@ class Header(ctk.CTkFrame):
 
         chan = ctk.CTkFrame(self, fg_color="transparent")
         chan.grid(row=0, column=3, sticky="e", padx=8)
-        self.channel = StatusChip(chan, "IDLE", COL_IDLE)
+        self.channel = StatusChip(chan, "Idle", COL_IDLE)
         self.channel.pack(side="left")
         self.occupancy_bar = ctk.CTkProgressBar(chan, width=110, mode="determinate")
         self.occupancy_bar.set(0)
@@ -77,16 +77,16 @@ class Header(ctk.CTkFrame):
         self.payload.configure(text=f"payload {ps} B" if ps else "payload —")
 
         self.ctrl_chip.set(
-            "control ●" if state.control_connected else "control ○",
+            "Control ●" if state.control_connected else "Control ○",
             "#3fb950" if state.control_connected else COL_OFF,
         )
         self.kiss_chip.set(
-            "kiss ●" if state.kiss_connected else "kiss ○",
+            "KISS ●" if state.kiss_connected else "KISS ○",
             "#3fb950" if state.kiss_connected else COL_OFF,
         )
 
         cstate = state.channel_state()
-        self.channel.set(cstate.upper(), state_color(cstate))
+        self.channel.set(cstate.capitalize(), state_color(cstate))
         status = state.status
         if state.config.get("csma_enabled", False):
             pct = int(status.get("occupancy_pct", 0) or 0)
