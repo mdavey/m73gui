@@ -1,11 +1,11 @@
-"""Channel tab: live CSMA/status view with sparklines."""
+"""Channel tab: event-driven link quality plus modem activity/counters."""
 
 from __future__ import annotations
 
+import time
+
 import customtkinter as ctk
 
-from ..constants import COL_OFF
-from . import theme
 from .theme import BG, FG, FG_DIM, FONTS
 from .widgets import Card, Sparkline
 
@@ -23,62 +23,22 @@ HEALTH = [
     ("rigctl_connected", "rigctld"),
 ]
 
+# last SNR/BER numbers go dim after this long without a decode
+LINK_FRESH_S = 60.0
+
 
 class ChannelTab(ctk.CTkFrame):
     def __init__(self, master, app) -> None:
         super().__init__(master, fg_color=BG)
         self.app = app
+        self._last_decode: float | None = None
 
         scroll = ctk.CTkScrollableFrame(self, fg_color=BG)
         scroll.pack(fill="both", expand=True, padx=6, pady=6)
 
-        top = ctk.CTkFrame(scroll, fg_color="transparent")
-        top.pack(fill="x")
-        top.grid_columnconfigure((0, 1, 2), weight=1)
-
-        # channel state tile
-        tile = Card(top, "Channel state")
-        tile.grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
-        self.big_state = ctk.CTkLabel(
-            tile, text="—", font=FONTS["big"], text_color=COL_OFF
-        )
-        self.big_state.pack(pady=(2, 4))
-        ctk.CTkLabel(
-            tile,
-            text="CSMA backoff phase is not exposed by modem73",
-            font=FONTS["small"],
-            text_color=FG_DIM,
-            wraplength=280,
-        ).pack(pady=(0, 8))
-
-        # channel metrics
-        metrics = Card(top, "Live metrics")
-        metrics.grid(row=0, column=1, sticky="nsew", padx=3, pady=3)
-        self.occ_bar = ctk.CTkProgressBar(metrics, mode="determinate")
-        self.occ_bar.set(0)
-        self.occ_bar.pack(fill="x", padx=12, pady=(6, 2))
-        self.occ_label = ctk.CTkLabel(metrics, text="occupancy —", font=FONTS["body"],
-                                      text_color=FG, anchor="w")
-        self.occ_label.pack(fill="x", padx=12)
-        self._metric_labels = {}
-        for key, label in [
-            ("population", "Population (300 s)"),
-            ("tx_queue", "TX queue depth"),
-            ("ptt", "PTT"),
-        ]:
-            row = ctk.CTkFrame(metrics, fg_color="transparent")
-            row.pack(fill="x", padx=12, pady=1)
-            ctk.CTkLabel(row, text=label, font=FONTS["body"], text_color=FG).pack(
-                side="left"
-            )
-            value = ctk.CTkLabel(row, text="—", font=FONTS["mono_small"],
-                                 text_color=FG_DIM)
-            value.pack(side="right")
-            self._metric_labels[key] = value
-
-        # link stats
-        link = Card(top, "Link quality")
-        link.grid(row=0, column=2, sticky="nsew", padx=3, pady=3)
+        # ---- link quality ----
+        link = Card(scroll, "Link quality")
+        link.pack(fill="x", pady=3)
         self._link_labels = {}
         for key, label in [
             ("last_snr", "Last SNR"),
@@ -94,23 +54,39 @@ class ChannelTab(ctk.CTkFrame):
                                  text_color=FG_DIM)
             value.pack(side="right")
             self._link_labels[key] = value
-        ctk.CTkLabel(link, text="occupancy (60 s)", font=FONTS["small"],
-                     text_color=FG_DIM, anchor="w").pack(fill="x", padx=12,
-                                                         pady=(4, 0))
-        self.spark_occ = Sparkline(link, color="#d29922", ceil=100.0)
-        self.spark_occ.pack(fill="x", padx=12, pady=(0, 4))
-        ctk.CTkLabel(link, text="SNR (60 s)", font=FONTS["small"],
-                     text_color=FG_DIM, anchor="w").pack(fill="x", padx=12)
-        self.spark_snr = Sparkline(link, color="#58a6ff", floor=-10, ceil=40,
-                                   fill=False)
-        self.spark_snr.pack(fill="x", padx=12, pady=(0, 8))
+        ctk.CTkLabel(
+            link, text="SNR per decode (last 120 frames)", font=FONTS["small"],
+            text_color=FG_DIM, anchor="w",
+        ).pack(fill="x", padx=12, pady=(4, 0))
+        self.spark_snr = Sparkline(link, color="#58a6ff", ceil=None)
+        self.spark_snr.pack(fill="x", padx=12, pady=(0, 4))
+        ctk.CTkLabel(
+            link, text="BER per decode (last 120 frames)", font=FONTS["small"],
+            text_color=FG_DIM, anchor="w",
+        ).pack(fill="x", padx=12)
+        self.spark_ber = Sparkline(link, color="#d29922", ceil=None)
+        self.spark_ber.pack(fill="x", padx=12, pady=(0, 8))
 
+        # ---- activity ----
         bottom = ctk.CTkFrame(scroll, fg_color="transparent")
         bottom.pack(fill="x")
         bottom.grid_columnconfigure((0, 1), weight=1)
 
-        counters = Card(bottom, "Counters")
+        counters = Card(bottom, "Activity")
         counters.grid(row=0, column=0, sticky="nsew", padx=3, pady=3)
+        self.occ_bar = ctk.CTkProgressBar(counters, mode="determinate")
+        self.occ_bar.set(0)
+        self.occ_bar.pack(fill="x", padx=12, pady=(6, 2))
+        self.occ_label = ctk.CTkLabel(counters, text="occupancy —",
+                                      font=FONTS["body"], text_color=FG, anchor="w")
+        self.occ_label.pack(fill="x", padx=12, pady=(0, 4))
+        self._metric_labels = {}
+        for key, label in [
+            ("population", "Population (300 s)"),
+            ("tx_queue", "TX queue depth"),
+            ("ptt", "PTT"),
+        ]:
+            self._metric_labels[key] = self._stat_row(counters, label)
         self._counter_labels = {}
         for key, label in COUNTERS:
             self._counter_labels[self._stat_row(counters, label)] = key
@@ -151,25 +127,35 @@ class ChannelTab(ctk.CTkFrame):
         value.pack(side="right")
         return value
 
-    # -- update ---------------------------------------------------------------
+    # -- per-decode input -------------------------------------------------------
+
+    def note_decode(self, snr, ber) -> None:
+        """Feed one decoded frame (from rx_frame events or history replay)."""
+        self._last_decode = time.monotonic()
+        if snr is not None:
+            self.spark_snr.push(float(snr))
+            self._link_labels["last_snr"].configure(
+                text=f"{float(snr):+.1f} dB", text_color=FG
+            )
+        if ber is not None and float(ber) >= 0:
+            self.spark_ber.push(float(ber))
+            self._link_labels["last_ber"].configure(
+                text=f"{float(ber) * 100:.2f} %", text_color=FG
+            )
+
+    # -- polled update ----------------------------------------------------------
 
     def update(self, state) -> None:
         status = state.status
         config = state.config
-        cstate = state.channel_state()
-        self.big_state.configure(
-            text=cstate.upper(), text_color=theme.state_color(cstate)
-        )
 
         if config.get("csma_enabled", False):
             pct = int(status.get("occupancy_pct", 0) or 0)
             self.occ_bar.set(min(1.0, max(0.0, pct / 100.0)))
             self.occ_label.configure(text=f"occupancy {pct} %")
-            self.spark_occ.push(float(pct))
         else:
             self.occ_bar.set(0)
             self.occ_label.configure(text="CSMA off — occupancy not meaningful")
-            self.spark_occ.push(None)
 
         self._metric_labels["population"].configure(
             text=str(status.get("population", "—"))
@@ -181,19 +167,17 @@ class ChannelTab(ctk.CTkFrame):
             text="ON" if status.get("ptt_on") else "off"
         )
 
-        snr = status.get("last_snr")
-        ber = status.get("last_ber")
         ema = status.get("ber_ema")
-        self._link_labels["last_snr"].configure(
-            text=f"{snr:+.1f} dB" if snr is not None else "—"
-        )
-        self._link_labels["last_ber"].configure(
-            text=f"{ber * 100:.2f} %" if ber is not None and ber >= 0 else "—"
-        )
         self._link_labels["ber_ema"].configure(
             text=f"{ema * 100:.3f} %" if ema is not None and ema >= 0 else "—"
         )
-        self.spark_snr.push(float(snr) if snr is not None else None)
+        fresh = (
+            self._last_decode is not None
+            and time.monotonic() - self._last_decode <= LINK_FRESH_S
+        )
+        color = FG if fresh else FG_DIM
+        for key in ("last_snr", "last_ber"):
+            self._link_labels[key].configure(text_color=color)
 
         for label, key in self._counter_labels.items():
             label.configure(text=str(status.get(key, "—")))

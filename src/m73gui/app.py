@@ -381,6 +381,7 @@ class App:
             seq = int(event.get("seq", 0) or 0)
             if self._note_seq(seq):
                 self.monitor.last_seq = max(self.monitor.last_seq, seq)
+                self._note_link_decode(event)
                 row = PacketRow(
                     time=float(event.get("time") or time.time()),
                     direction=RX,
@@ -401,6 +402,14 @@ class App:
         self.settings_tab.load(cfg)
         self.channel_tab.update(self.state)
 
+    def _note_link_decode(self, frame: dict) -> None:
+        """Feed per-decode SNR/BER into the channel tab's link charts."""
+        ber_pct = frame.get("ber_pct")
+        ber = None
+        if ber_pct is not None and float(ber_pct) >= 0:
+            ber = float(ber_pct) / 100.0
+        self.channel_tab.note_decode(frame.get("snr"), ber)
+
     def _note_seq(self, seq: int) -> bool:
         """True when this seq is new; remember it (bounded)."""
         if seq in self._seen_seqs:
@@ -416,6 +425,7 @@ class App:
             seq = int(f.get("seq", 0) or 0)
             if not self._note_seq(seq):
                 continue
+            self._note_link_decode(f)
             ts = float(f.get("time") or (time.time() - float(f.get("age_s", 0))))
             row = PacketRow(
                 time=ts,

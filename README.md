@@ -25,8 +25,9 @@ next to the radio, or across the house from a machine hosting the audio.
   `~/Downloads/m73gui/` with SHA-256 verification and missing-chunk reports.
 - **Packets** — a live table of every decoded frame (mode, SNR, BER, payload) with
   a detail view, plus a summary of everything you transmit.
-- **Channel** — waterfall-style sparklines for SNR and occupancy, station count,
-  and transmit queue depth, sampled from the control port.
+- **Channel** — link-quality trend charts fed by every decoded frame (per-frame
+  SNR and BER), an occupancy bar, population/TX-queue/PTT metrics, modem error
+  counters, and audio/rigctld health.
 - **Settings** — every modem73 configuration field in a validated form: callsign,
   modem type, modulation, code rate, frame size, CSMA options, and more. Only
   changed fields are written back.
