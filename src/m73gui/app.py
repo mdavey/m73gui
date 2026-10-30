@@ -18,9 +18,7 @@ from .constants import (
     COL_WARN,
     EVENT_PUMP_INTERVAL_MS,
     KIND_CHAT,
-    KIND_FILE_CHUNK,
-    KIND_FILE_END,
-    KIND_FILE_START,
+    KIND_FILE_BLOCK,
 )
 from .net.control import ControlClient, ControlError
 from .net.kiss import KissClient
@@ -157,12 +155,12 @@ class App:
 
     # -------------------------------------------------------- app API for UI
 
-    def chunk_size(self) -> int:
+    def block_size(self) -> int:
         ps = self.state.payload_size
         if not ps:
             return 0
         try:
-            return protocol.chunk_size_for(ps)
+            return protocol.block_size_for(ps)
         except protocol.ProtocolError:
             return 0
 
@@ -191,12 +189,12 @@ class App:
         else:
             self.notify(f"queued {len(frames)} chat part(s) for broadcast")
 
-    def send_file(self, path: str) -> str | None:
+    def send_file(self, path: str, fec: int = 2) -> str | None:
         if not self.kiss.connected:
             return "KISS link is down; cannot transfer files"
         if not self.control.connected:
             return "control link is down; pacing and settings are unavailable"
-        return self.sender.start(path)
+        return self.sender.start(path, fec=fec)
 
     def cancel_file(self) -> None:
         self.sender.cancel()
@@ -221,7 +219,7 @@ class App:
             self.settings_tab.on_apply_result(False, f"apply failed: {error}")
         else:
             self.settings_tab.on_apply_result(True, str(value))
-            # frame sizes may have changed; stale chunk info is misleading
+            # frame sizes may have changed; stale block math is misleading
             self.files_tab.clear_selection()
 
     def refresh_settings(self) -> None:
@@ -361,9 +359,9 @@ class App:
             self.state.incoming[snap.transfer_id] = snap
             self.files_tab.update_incoming(snap)
             if snap.status == "complete":
-                self.notify(f"received {snap.name} → {snap.path}")
-            elif snap.status in ("incomplete", "corrupt"):
-                self.notify(f"incoming {snap.name}: {snap.status} ({snap.message})",
+                self.notify(f"received {snap.name or '?'} → {snap.path}")
+            elif snap.status == "failed":
+                self.notify(f"incoming {snap.sender}: {snap.message}",
                             level="warn")
         elif kind == "async_result":
             cb = data.get("cb")
@@ -488,22 +486,15 @@ class App:
                     f"{part.text[:40]!r}" + (" (self)" if echo else ""),
                     not echo,
                 )
-            if env.kind == KIND_FILE_START:
-                fs = protocol.decode_file_start(env)
+            if env.kind == KIND_FILE_BLOCK:
+                fec, total, _block = protocol.decode_file_block(env)
                 echo = env.transfer_id in self.outgoing_ids
                 return (
-                    "file-start",
-                    f"{fs.name} {protocol.human_bytes(fs.file_size)} in "
-                    f"{fs.total_chunks}x{fs.chunk_size} B"
+                    "file-block",
+                    f"file block {env.seq + 1}/{total} · L{fec}"
                     + (" (self)" if echo else ""),
                     True,
                 )
-            if env.kind == KIND_FILE_CHUNK:
-                data, ok = protocol.decode_file_chunk(env)
-                return "file-chunk", f"chunk {env.seq} crc_ok={ok}", True
-            if env.kind == KIND_FILE_END:
-                total, _sha = protocol.decode_file_end(env)
-                return "file-end", f"end of {total} chunks", True
         except protocol.ProtocolError as exc:
             return "malformed", str(exc), False
         return "control", f"unknown M73G kind {env.kind:#02x}", False
@@ -519,13 +510,9 @@ class App:
                 text, _complete = result
                 stamp = time.strftime("%H:%M:%S", time.localtime())
                 self.chat_tab.add_line(f"[{stamp}] {text}")
-        elif env.kind == KIND_FILE_START:
-            fs = protocol.decode_file_start(env)
-            self.incoming.handle_start(env, fs, sender=sender)
-        elif env.kind == KIND_FILE_CHUNK:
-            self.incoming.handle_chunk(env)
-        elif env.kind == KIND_FILE_END:
-            self.incoming.handle_end(env)
+        elif env.kind == KIND_FILE_BLOCK:
+            fec, total, block = protocol.decode_file_block(env)
+            self.incoming.handle_block(env, fec, total, block, sender=sender)
 
     # ------------------------------------------------------------- TX rows
 

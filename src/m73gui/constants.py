@@ -23,25 +23,17 @@ M73G_VERSION = 0x01
 HEADER_LEN = 14  # magic(4) version(1) kind(1) transfer_id(4) seq(4)
 
 KIND_CHAT = 0x01
-KIND_FILE_START = 0x02
-KIND_FILE_CHUNK = 0x03
-KIND_FILE_END = 0x04
+KIND_FILE_BLOCK = 0x02  # rsfec-protected file block (fec | total | block)
 
 KIND_NAMES = {
     KIND_CHAT: "chat",
-    KIND_FILE_START: "file-start",
-    KIND_FILE_CHUNK: "file-chunk",
-    KIND_FILE_END: "file-end",
+    KIND_FILE_BLOCK: "file-block",
 }
 
-FILE_START_FIXED_TAIL = 8 + 4 + 4 + 1 + 32 + 8  # size..sha + settings, excluding name
 FILE_NAME_MAX_BYTES = 64
 CHAT_FROM_MAX_LEN = 16
-FILE_MAX_BYTES = 100 * 1024 * 1024  # receiver hard cap
-FILE_MAX_CHUNKS = 2_000_000
-
-# FILE_START flags
-FLAG_POSTAMBLE = 0x01
+FILE_MAX_BYTES = 1024 * 1024  # whole file is RS-packed in memory: 1 MiB hard cap
+FILE_MAX_BLOCKS = 65_535  # per-stream sanity cap (data + parity blocks)
 
 # TX drain wait (file end, queue settling)
 TX_DRAIN_TIMEOUT_S = 60.0

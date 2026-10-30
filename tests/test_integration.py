@@ -3,7 +3,6 @@ protocol decode -> incoming reassembler, plus control startup sequence."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import queue
@@ -15,16 +14,14 @@ import threading
 import time
 import unittest
 
+import rsfec
+
 from m73gui import protocol
-from m73gui.constants import (
-    KIND_FILE_CHUNK,
-    KIND_FILE_END,
-    KIND_FILE_START,
-)
+from m73gui.constants import KIND_FILE_BLOCK
 from m73gui.net.control import ControlClient
 from m73gui.net.kiss import KissClient, wrap_frame
 from m73gui.services.monitor import Monitor
-from m73gui.services.transfers import IncomingFiles, target_settings
+from m73gui.services.transfers import IncomingFiles
 from m73gui.state import INCOMING_COMPLETE
 
 CONFIG = {
@@ -136,32 +133,33 @@ class EndToEndTest(unittest.TestCase):
         self.assertEqual(kinds["history"]["frames"][0]["seq"], 2)
         self.assertEqual(monitor.last_seq, 2)
 
-    def test_kiss_broadcast_file_received(self):
-        data = os.urandom(1200)  # 492*2 + 216 -> 3 chunks
-        sha = hashlib.sha256(data).digest()
-        chunk_size = protocol.chunk_size_for(CONFIG["payload_size"])
-        total = (len(data) + chunk_size - 1) // chunk_size
+    def test_kiss_broadcast_file_received_with_losses(self):
+        data = os.urandom(1200)
+        block_size = protocol.block_size_for(CONFIG["payload_size"])
+        fec = 2
+        packed = rsfec.pack_bytes(data, name="e2e.bin", block_size=block_size, fec=fec)
+        total = packed.total_blocks
         tid = protocol.new_transfer_id()
+        lost = {1}  # simulated packet loss: within the L2 repair budget
 
         files = IncomingFiles(
             downloads_dir=os.path.join(self.tmp, "dl"),
             emit=lambda kind, **d: self.events.put((kind, d)),
             outgoing_ids=set(),
             accept_self=lambda: False,
+            idle_timeout=0.5,
         )
 
         def serve():
             conn = accept_one(self.kiss_srv)
-            start = protocol.encode_file_start(
-                tid, len(data), chunk_size, total, "e2e.bin", sha,
-                target_settings(CONFIG), flags=0,
-            )
-            conn.sendall(wrap_frame(start))
             for i in range(total):
-                chunk = data[i * chunk_size : (i + 1) * chunk_size]
-                conn.sendall(wrap_frame(protocol.encode_file_chunk(tid, i, chunk)))
+                if i in lost:
+                    continue
+                block = packed.stream[i * block_size : (i + 1) * block_size]
+                conn.sendall(
+                    wrap_frame(protocol.encode_file_block(tid, i, fec, total, block))
+                )
                 time.sleep(0.02)
-            conn.sendall(wrap_frame(protocol.encode_file_end(tid, total, sha)))
 
         threading.Thread(target=serve, daemon=True).start()
         self.kiss.start()
@@ -175,25 +173,22 @@ class EndToEndTest(unittest.TestCase):
                 continue
             if kind == "kiss_rx":
                 env = protocol.decode_envelope(payload["data"])
-                if env is None:
-                    continue
-                if env.kind == KIND_FILE_START:
-                    files.handle_start(
-                        env, protocol.decode_file_start(env), sender="VK9E2E"
+                if env is not None and env.kind == KIND_FILE_BLOCK:
+                    fec_x, total_x, block = protocol.decode_file_block(env)
+                    files.handle_block(
+                        env, fec_x, total_x, block, sender="VK9E2E"
                     )
-                elif env.kind == KIND_FILE_CHUNK:
-                    files.handle_chunk(env)
-                elif env.kind == KIND_FILE_END:
-                    files.handle_end(env)
             elif kind == "transfer_rx":
                 snap = payload["snapshot"]
                 if snap.status == INCOMING_COMPLETE:
                     routed = True
                     with open(snap.path, "rb") as fh:
                         self.assertEqual(fh.read(), data)
+                    self.assertEqual(snap.name, "e2e.bin")
                     self.assertTrue(snap.path.startswith(
                         os.path.join(self.tmp, "dl")))
                     break
+            files.sweep()  # pump-driven sweep in the real app
         self.assertTrue(routed, "incoming transfer never completed")
 
 

@@ -1,4 +1,10 @@
-"""Outgoing file sender and incoming reassembler.
+"""Outgoing file sender and incoming reassembler for rsfec block streams.
+
+A transfer is a flat stream of rsfec blocks: block i goes out as a
+FILE_BLOCK packet with envelope seq == i, and every packet repeats the FEC
+level and packet total. There are no start/end frames; a receiver bootstraps
+from any single packet and repairs whole lost blocks with RS erasure decoding
+once the stream idles out (or completes it immediately when nothing was lost).
 
 All logic is transport-agnostic: the sender takes callables for frame sending,
 status/config access, sleeping, and clock, so the full sequence can be unit
@@ -7,37 +13,32 @@ tested with fakes.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import os
-import queue
 import threading
 import time
 from typing import Callable
 
+import rsfec
+from rsfec.geometry import total_blocks_for
+from rsfec.header import header_length, parse_header
+
 from .. import protocol
 from ..constants import (
-    CODE_RATES,
+    FILE_MAX_BLOCKS,
     FILE_MAX_BYTES,
-    FILE_MAX_CHUNKS,
-    FLAG_POSTAMBLE,
-    FRAME_SIZE_NAMES,
     INCOMING_IDLE_TIMEOUT_S,
-    MFSK_MODE_NAMES,
-    OFDM_MODULATIONS,
     PACING_HIGH_WATER,
     PACING_LOW_WATER,
     PACING_POLL_S,
-    ROBUST_MODE_NAMES,
     TX_DRAIN_TIMEOUT_S,
 )
 from ..state import (
-    TX,
     INCOMING_ACTIVE,
     INCOMING_COMPLETE,
-    INCOMING_CORRUPT,
-    INCOMING_INCOMPLETE,
+    INCOMING_FAILED,
+    INCOMING_RECOVERING,
     TX_CANCELLED,
     TX_FAILED,
     TX_PENDING,
@@ -49,37 +50,16 @@ from ..state import (
 
 log = logging.getLogger("m73gui.transfers")
 
-MODEM_SETTING_FIELDS = (
-    "modem_type",
-    "modulation",
-    "code_rate",
-    "frame_size",
-    "mfsk_mode",
-    "robust_mode",
-)
+DEFAULT_FEC = 2
+SMALL_BLOCK_WARN = 128  # below this the 21 B header dominates airtime
 
 
-def target_settings(config: dict) -> dict:
-    return {k: config[k] for k in MODEM_SETTING_FIELDS if k in config}
-
-
-def settings_in_range(fs: protocol.FileStart) -> str | None:
-    """Error string when FILE_START modem field indexes are out of range."""
-    if fs.modem_type not in (0, 1, 2):
-        return "invalid modem_type"
-    if fs.modem_type == 0:
-        if (
-            fs.modulation >= len(OFDM_MODULATIONS)
-            or fs.code_rate >= len(CODE_RATES)
-            or fs.frame_size >= len(FRAME_SIZE_NAMES)
-        ):
-            return "invalid OFDM settings"
-    elif fs.modem_type == 1:
-        if fs.mfsk_mode >= len(MFSK_MODE_NAMES):
-            return "invalid MFSK mode"
-    elif fs.robust_mode >= len(ROBUST_MODE_NAMES):
-        return "invalid ROBUST mode"
-    return None
+def blocks_needed(name: str, file_size: int, block_size: int, fec: int) -> int:
+    """Packed block count (data + parity) a file of *file_size* bytes needs."""
+    data_blocks = max(
+        1, math.ceil((header_length(name) + file_size) / block_size)
+    )
+    return total_blocks_for(fec, data_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -117,21 +97,29 @@ class FileSender:
     def busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, path: str) -> str | None:
+    def start(self, path: str, fec: int = DEFAULT_FEC) -> str | None:
         """Begin transfer; returns an error string or None."""
         if self.busy():
             return "a transfer is already running"
+        if fec not in (1, 2, 3, 4):
+            return f"invalid FEC level {fec!r}"
         try:
             size = os.path.getsize(path)
         except OSError as exc:
             return f"cannot read file: {exc}"
+        if size < 1:
+            return "file is empty"
+        if size > FILE_MAX_BYTES:
+            return (
+                f"file too large ({protocol.human_bytes(size)}); "
+                f"maximum is {protocol.human_bytes(FILE_MAX_BYTES)}"
+            )
         snap = OutgoingSnapshot(
             filename=os.path.basename(path),
             file_size=size,
-            chunk_size=0,
-            total_chunks=0,
+            fec=fec,
             status=TX_PENDING,
-            message="Hashing…",
+            message="Packing…",
         )
         self.snapshot = snap
         self._cancel.clear()
@@ -222,119 +210,114 @@ class FileSender:
                 return False
         return False
 
-    def _send_start(self, frame: bytes, times: int) -> bool:
-        for _ in range(times):
-            if not self.send_frame(frame):
-                self._fail("KISS link unavailable while queueing file start")
-                return False
-        return True
-
     def _run(self, path: str) -> None:
         snap = self.snapshot
         assert snap is not None
 
-        sha = hashlib.sha256()
-        with open(path, "rb") as fh:
-            while block := fh.read(1 << 20):
-                sha.update(block)
-                if self._stopped():
-                    self._finish(TX_CANCELLED, "cancelled")
-                    return
-        sha256 = sha.digest()
-
         cfg = self.get_config()
         if cfg is None:
-            self._fail("control link required to compute chunk size")
+            self._fail("control link required to compute block size")
             return
         payload_size = int(cfg.get("payload_size", 0))
         try:
-            chunk_size = protocol.chunk_size_for(payload_size)
+            block_size = protocol.block_size_for(payload_size)
         except protocol.ProtocolError as exc:
             self._fail(str(exc))
             return
-        total = (
-            math.ceil(snap.file_size / chunk_size) if snap.file_size else 0
-        )
-        snap.chunk_size = chunk_size
-        snap.total_chunks = total
+
+        try:
+            packed = rsfec.pack(
+                path, block_size=block_size, fec=snap.fec
+            )
+        except (OSError, ValueError, rsfec.RsfecError) as exc:
+            self._fail(f"packing failed: {exc}")
+            return
+        total = packed.total_blocks
+        if total > FILE_MAX_BLOCKS:
+            self._fail(
+                f"file needs {total} blocks (max {FILE_MAX_BLOCKS})"
+            )
+            return
+        snap.block_size = block_size
+        snap.total_blocks = total
         transfer_id = protocol.new_transfer_id()
         self.outgoing_ids.add(transfer_id)
-        settings = target_settings(cfg)
         self._publish(
             status=TX_SENDING,
-            message=f"Broadcasting {total} chunks of {chunk_size} B",
+            message=(
+                f"Broadcasting {total} blocks of {block_size} B "
+                f"(FEC L{snap.fec}, +{packed.parity_blocks} parity)"
+            ),
         )
+        if block_size < SMALL_BLOCK_WARN:
+            self.emit(
+                "notify",
+                level="warn",
+                message=(
+                    f"small {block_size} B blocks: framing overhead dominates "
+                    "airtime on this mode"
+                ),
+            )
         if total > 200:
             self.emit(
                 "notify",
                 level="warn",
-                message=f"large transfer: {protocol.human_bytes(snap.file_size)} will take a while",
+                message=(
+                    f"large transfer: {protocol.human_bytes(snap.file_size)} "
+                    f"will take a while ({total} blocks incl. parity)"
+                ),
             )
 
         if self._stopped():
             self._finish(TX_CANCELLED, "cancelled")
             return
 
-        # Re-verify config before chunking (mode may have changed externally).
+        # Re-verify config before streaming (mode may have changed externally).
         cfg = self.get_config()
         if cfg is None:
             self._fail("control link lost before transfer")
             return
-        if int(cfg.get("payload_size", 0)) < chunk_size + 20:
+        if int(cfg.get("payload_size", 0)) < block_size + 21:
             self._fail(
-                "modem mode changed; current payload no longer fits the planned chunks"
+                "modem mode changed; current payload no longer fits the "
+                "planned blocks"
             )
             return
 
-        flags = FLAG_POSTAMBLE if cfg.get("postamble") else 0
-        start = protocol.encode_file_start(
-            transfer_id,
-            snap.file_size,
-            chunk_size,
-            total,
-            snap.filename,
-            sha256,
-            settings,
-            flags=flags,
-        )
-        if not self._send_start(start, 2):
-            return
-
-        # paced chunk loop
+        # paced block loop
         depth: int | None = None
         fallback_delay = max(0.3, payload_size / 400.0)
-        with open(path, "rb") as fh:
-            index = 0
-            while index < total:
-                if self._stopped():
-                    self._finish(TX_CANCELLED, "cancelled")
-                    return
-                if depth is not None and depth >= PACING_HIGH_WATER:
-                    while depth is not None and depth > PACING_LOW_WATER:
-                        if self._stopped():
-                            self._finish(TX_CANCELLED, "cancelled")
-                            return
-                        self._wait(PACING_POLL_S)
-                        depth = self._queue_depth()
-                        if depth is None and self.get_status() is None:
-                            self._fail("control link lost during transfer")
-                            return
-                fh.seek(index * chunk_size)
-                data = fh.read(chunk_size)
-                frame = protocol.encode_file_chunk(transfer_id, index, data)
-                if not self.send_frame(frame):
-                    self._fail("KISS link lost mid-transfer")
-                    return
-                index += 1
-                depth = None if depth is None else depth + 1
-                snap.sent_chunks = index
-                snap.sent_bytes = min(snap.file_size, index * chunk_size)
-                if index % 8 == 0 or index == total:
-                    self._publish()
-                if depth is None:
-                    if self._wait(fallback_delay):
-                        continue  # loop re-checks cancelled/aborted
+        for index in range(total):
+            if self._stopped():
+                self._finish(TX_CANCELLED, "cancelled")
+                return
+            if depth is not None and depth >= PACING_HIGH_WATER:
+                while depth is not None and depth > PACING_LOW_WATER:
+                    if self._stopped():
+                        self._finish(TX_CANCELLED, "cancelled")
+                        return
+                    self._wait(PACING_POLL_S)
                     depth = self._queue_depth()
+                    if depth is None and self.get_status() is None:
+                        self._fail("control link lost during transfer")
+                        return
+            block = packed.stream[index * block_size : (index + 1) * block_size]
+            frame = protocol.encode_file_block(
+                transfer_id, index, snap.fec, total, block
+            )
+            if not self.send_frame(frame):
+                self._fail("KISS link lost mid-transfer")
+                return
+            snap.sent_blocks = index + 1
+            queued_data = (index + 1) * block_size - header_length(snap.filename)
+            snap.sent_bytes = min(snap.file_size, max(0, queued_data))
+            if index % 8 == 0 or index == total - 1:
+                self._publish()
+            depth = None if depth is None else depth + 1
+            if depth is None:
+                if self._wait(fallback_delay):
+                    continue  # loop re-checks cancelled/aborted
+                depth = self._queue_depth()
 
         if self._stopped():
             self._finish(TX_CANCELLED, "cancelled")
@@ -348,12 +331,8 @@ class FileSender:
             self.emit(
                 "notify",
                 level="warn",
-                message="TX queue did not drain; sending file end anyway",
+                message="TX queue did not drain before timeout",
             )
-        end = protocol.encode_file_end(transfer_id, total, sha256)
-        if not self._send_start(end, 2):
-            return
-        self._wait_drain(self.drain_timeout)
         self._finish(TX_SENT, "Broadcast sent (unconfirmed)")
 
 
@@ -361,61 +340,51 @@ class FileSender:
 # Incoming reassembler
 
 
-class _Incoming:
+class _Stream:
+    """One (sender, transfer_id) file stream buffered entirely in RAM."""
+
     def __init__(
-        self,
-        transfer_id: int,
-        start: protocol.FileStart,
-        sender: str,
-        path: str,
+        self, transfer_id: int, sender: str, fec: int, total: int, block_size: int
     ) -> None:
         self.transfer_id = transfer_id
-        self.start = start
         self.sender = sender
-        self.path = path
-        self.file = open(path, "wb")
-        self.bitmap = bytearray(math.ceil(start.total_chunks / 8)) if start.total_chunks else bytearray()
-        self.received = 0
-        self.corrupt = 0
-        self.dupes = 0
-        self.got_end = False
+        self.fec = fec
+        self.total = total
+        self.block_size = block_size
+        self.buf = bytearray(total * block_size)
+        self.received: set[int] = set()
         self.status = INCOMING_ACTIVE
-        self.last_chunk_time = time.monotonic()
-        self.finalized = False
-        self.message = ""
+        self.message = "receiving"
+        self.path = ""
+        self.name = ""
+        self.file_size = 0
+        self.name_known = False
+        self.attempted = False
+        self.retried_full = False
+        self.last_block_time = time.monotonic()
 
-    def has(self, index: int) -> bool:
-        return bool(self.bitmap[index // 8] & (1 << (index % 8)))
-
-    def set(self, index: int) -> None:
-        self.bitmap[index // 8] |= 1 << (index % 8)
+    @property
+    def finalized(self) -> bool:
+        return self.status in (INCOMING_COMPLETE, INCOMING_FAILED)
 
     def snapshot(self) -> IncomingSnapshot:
-        total = self.start.total_chunks
         return IncomingSnapshot(
             transfer_id=self.transfer_id,
             sender=self.sender,
-            name=os.path.basename(self.path).removesuffix(".part"),
-            file_size=self.start.file_size,
-            chunk_size=self.start.chunk_size,
-            total_chunks=total,
-            received_chunks=self.received,
-            missing_chunks=max(0, total - self.received),
+            name=self.name,
+            file_size=self.file_size,
+            block_size=self.block_size,
+            total_blocks=self.total,
+            received_blocks=len(self.received),
             status=self.status,
             path=self.path,
             message=self.message,
         )
 
-    def close(self) -> None:
-        try:
-            self.file.close()
-        except OSError:
-            pass
-
 
 class IncomingFiles:
-    """Receives broadcast transfers. Called from the app (Tk) thread only;
-    hashing/finalize runs in a short-lived worker."""
+    """Receives broadcast block streams. handle_block runs on the app (Tk)
+    thread; RS repair/verification runs in a short-lived worker."""
 
     def __init__(
         self,
@@ -430,189 +399,170 @@ class IncomingFiles:
         self.outgoing_ids = outgoing_ids
         self.accept_self = accept_self
         self.idle_timeout = idle_timeout
-        self.transfers: dict[int, _Incoming] = {}
+        self.streams: dict[tuple[str, int], _Stream] = {}
         self.max_records = 64
 
     def _evict_old(self) -> None:
         """Keep the record list bounded; prefer dropping finished transfers."""
-        while len(self.transfers) > self.max_records:
+        while len(self.streams) > self.max_records:
             victim = next(
-                (tid for tid, t in self.transfers.items() if t.finalized), None
+                (k for k, s in self.streams.items() if s.finalized), None
             )
             if victim is None:
-                victim = next(iter(self.transfers))
-            self.transfers.pop(victim)
+                victim = next(iter(self.streams))
+            self.streams.pop(victim)
 
     # -- routing --------------------------------------------------------------
 
-    def handle_start(
-        self, env: protocol.Envelope, fs: protocol.FileStart, sender: str = ""
+    def handle_block(
+        self, env: protocol.Envelope, fec: int, total: int, block: bytes,
+        sender: str = "",
     ) -> None:
-        error = self._validate(fs)
-        if error:
-            log.info("rejecting file_start (%s): %s", env.transfer_id, error)
-            return
-        if fs.transfer_id in self.outgoing_ids and not self.accept_self():
+        tid = env.transfer_id
+        if tid in self.outgoing_ids and not self.accept_self():
             return  # our own echo
-        if fs.transfer_id in self.transfers:
-            return  # duplicate start ignored
-
-        name = protocol.sanitize_filename(fs.name)
-        path = self._unique_path(name + ".part")
-        try:
-            transfer = _Incoming(fs.transfer_id, fs, sender, path)
-        except OSError as exc:
-            self.emit("notify", level="error", message=f"cannot create {name}: {exc}")
-            return
-        self.transfers[fs.transfer_id] = transfer
-        self._evict_old()
-        transfer.message = f"receiving {name}"
-        self._update(transfer)
-
-    @staticmethod
-    def _validate(fs: protocol.FileStart) -> str | None:
-        if not 0 <= fs.file_size <= FILE_MAX_BYTES:
-            return f"file size {fs.file_size} out of range"
-        if fs.chunk_size < 1:
-            return "chunk_size < 1"
-        expected = math.ceil(fs.file_size / fs.chunk_size) if fs.file_size else 0
-        if fs.total_chunks != expected:
-            return f"total_chunks {fs.total_chunks} != expected {expected}"
-        if fs.total_chunks > FILE_MAX_CHUNKS:
-            return "too many chunks"
-        return settings_in_range(fs)
-        return None
-
-    def handle_chunk(self, env: protocol.Envelope) -> None:
-        transfer = self.transfers.get(env.transfer_id)
-        if transfer is None or transfer.finalized:
-            return
-        index = env.seq
-        if index >= transfer.start.total_chunks:
-            return
-        data, ok = protocol.decode_file_chunk(env)
-        if not ok:
-            transfer.corrupt += 1
-            return
-        expected_len = min(
-            transfer.start.chunk_size,
-            transfer.start.file_size - index * transfer.start.chunk_size,
-        )
-        if len(data) != expected_len:
-            transfer.corrupt += 1
-            return
-        if transfer.has(index):
-            transfer.dupes += 1
-            return
-        try:
-            transfer.file.seek(index * transfer.start.chunk_size)
-            transfer.file.write(data)
-        except OSError as exc:
-            transfer.status = INCOMING_INCOMPLETE
-            transfer.message = f"write error: {exc}"
-            transfer.close()
-            transfer.finalized = True
-            self._update(transfer)
-            return
-        transfer.set(index)
-        transfer.received += 1
-        transfer.last_chunk_time = time.monotonic()
-        if transfer.status == INCOMING_INCOMPLETE and not transfer.finalized:
-            transfer.status = INCOMING_ACTIVE  # late chunks revive a timed-out offer
-            transfer.message = "resumed"
-        self._update(transfer)
-        if transfer.received == transfer.start.total_chunks:
-            self._finalize(transfer)
-
-    def handle_end(self, env: protocol.Envelope) -> None:
-        transfer = self.transfers.get(env.transfer_id)
-        if transfer is None or transfer.finalized:
-            return
-        transfer.got_end = True
-        if transfer.received < transfer.start.total_chunks:
-            transfer.status = INCOMING_INCOMPLETE
-            transfer.message = (
-                f"{transfer.start.total_chunks - transfer.received} chunks missing"
+        key = (sender, tid)
+        stream = self.streams.get(key)
+        if stream is None:
+            if not 1 <= total <= FILE_MAX_BLOCKS:
+                log.info("rejecting stream %s: total_packets %s", tid, total)
+                return
+            stream = _Stream(tid, sender, fec, total, len(block))
+            self.streams[key] = stream
+            self._evict_old()
+        elif fec != stream.fec or total != stream.total or len(block) != stream.block_size:
+            log.info(
+                "mismatched file_block (tid=%s seq=%s): ignoring", tid, env.seq
             )
-            self._update(transfer)
-        else:
-            self._finalize(transfer)  # empty files complete on FILE_END
+            return
+
+        seq = env.seq
+        if seq >= stream.total or seq in stream.received:
+            return
+        b = stream.block_size
+        stream.buf[seq * b : (seq + 1) * b] = block
+        stream.received.add(seq)
+        stream.last_block_time = time.monotonic()
+        if stream.status == INCOMING_FAILED:
+            # late blocks revive a failed stream for another sweep attempt
+            stream.status = INCOMING_ACTIVE
+            stream.attempted = False
+            stream.retried_full = False
+            stream.message = "resumed"
+        self._peek(stream)
+        self._update(stream)
+        if len(stream.received) == stream.total and not stream.attempted:
+            self._attempt(stream, set())
 
     def sweep(self) -> None:
-        """Mark idle transfers incomplete (called periodically from the pump)."""
+        """Attempt RS repair on streams that idled out (periodic pump call)."""
         now = time.monotonic()
-        for transfer in self.transfers.values():
-            if transfer.finalized or transfer.status != INCOMING_ACTIVE:
+        for stream in list(self.streams.values()):
+            if stream.status != INCOMING_ACTIVE or stream.attempted:
                 continue
-            if now - transfer.last_chunk_time > self.idle_timeout:
-                if transfer.status == INCOMING_ACTIVE:
-                    transfer.status = INCOMING_INCOMPLETE  # keep .part openable
-                    transfer.message = "timed out (idle)"
-                    self._update(transfer)
+            if now - stream.last_block_time > self.idle_timeout:
+                missing = set(range(stream.total)) - stream.received
+                self._attempt(stream, missing)
 
     def close_all(self) -> None:
-        for transfer in self.transfers.values():
-            if not transfer.finalized:
-                transfer.close()
-                transfer.finalized = True
+        self.streams.clear()
 
-    # -- finalize ----------------------------------------------------------------
+    # -- repair / finalize ------------------------------------------------------
 
-    def _finalize(self, transfer: _Incoming) -> None:
-        transfer.close()
-        transfer.finalized = True
+    def _attempt(self, stream: _Stream, missing: set[int]) -> None:
+        stream.attempted = True
+        stream.status = INCOMING_RECOVERING
+        stream.message = (
+            "verifying…" if not missing else f"repairing {len(missing)} missing blocks…"
+        )
+        self._update(stream)
+        buf = bytes(stream.buf)  # snapshot; handle_block may keep mutating
 
         def worker() -> None:
-            digest = hashlib.sha256()
             try:
-                with open(transfer.path, "rb") as fh:
-                    while block := fh.read(1 << 20):
-                        digest.update(block)
-            except OSError:
-                transfer.status = INCOMING_CORRUPT
-                transfer.message = "cannot re-read .part file"
-                self.emit("transfer_rx", snapshot=transfer.snapshot())
-                return
-            if digest.digest() == transfer.start.sha256:
-                final = self._unique_final_name(
-                    os.path.splitext(transfer.path)[0]
+                unpacked = rsfec.unpack(
+                    buf,
+                    block_size=stream.block_size,
+                    fec=stream.fec,
+                    missing=missing or None,
                 )
-                try:
-                    os.replace(transfer.path, final)
-                    transfer.status = INCOMING_COMPLETE
-                    transfer.message = "sha256 verified"
-                    transfer.path = final
-                except OSError as exc:
-                    transfer.status = INCOMING_CORRUPT
-                    transfer.message = f"rename failed: {exc}"
-            else:
-                transfer.status = INCOMING_CORRUPT
-                transfer.message = "sha256 mismatch"
-            self.emit("transfer_rx", snapshot=transfer.snapshot())
+            except (rsfec.RsfecError, ValueError) as exc:
+                self._attempt_failed(stream, exc)
+                return
+            name = protocol.sanitize_filename(unpacked.name)
+            path = self._unique_path(name)
+            try:
+                with open(path, "wb") as fh:
+                    fh.write(unpacked.data)
+            except OSError as exc:
+                stream.status = INCOMING_FAILED
+                stream.message = f"write error: {exc}"
+                self.emit("transfer_rx", snapshot=stream.snapshot())
+                return
+            stream.status = INCOMING_COMPLETE
+            stream.message = "sha1 verified"
+            stream.path = path
+            stream.name = name
+            stream.file_size = unpacked.size
+            self.emit("transfer_rx", snapshot=stream.snapshot())
 
-        threading.Thread(target=worker, name="m73gui-hash", daemon=True).start()
+        threading.Thread(target=worker, name="m73gui-repair", daemon=True).start()
+
+    def _attempt_failed(self, stream: _Stream, exc: Exception) -> None:
+        if len(stream.received) >= stream.total and not stream.retried_full:
+            # blocks arrived after the buffer snapshot; one retry with the
+            # now-complete stream before giving up
+            stream.retried_full = True
+            stream.attempted = False
+            self._attempt(stream, set())
+            return
+        stream.status = INCOMING_FAILED
+        stream.message = f"unrecoverable: {exc}"[:160]
+        self.emit("transfer_rx", snapshot=stream.snapshot())
 
     # -- helpers ---------------------------------------------------------------
 
+    def _peek(self, stream: _Stream) -> None:
+        """Reveal name/size as soon as the container header is fully buffered."""
+        if stream.name_known:
+            return
+        n = 0
+        while n in stream.received and n < stream.total:
+            n += 1
+        if n == 0:
+            return
+        try:
+            hdr = parse_header(stream.buf[: n * stream.block_size])
+        except rsfec.RsfecError:
+            return
+        if hdr.fec != stream.fec or hdr.block_size != stream.block_size:
+            return  # coincidental bytes; header not really intact
+        stream.name = protocol.sanitize_filename(hdr.name)
+        stream.file_size = hdr.file_size
+        stream.name_known = True
+
     def _unique_path(self, name: str) -> str:
+        """Atomically reserve a non-existing downloads path (workers and
+        concurrent streams may race on the same filename)."""
         os.makedirs(self.downloads_dir, exist_ok=True)
-        path = os.path.join(self.downloads_dir, name)
-        counter = 1
-        while os.path.exists(path):
-            stem, dot, ext = name.rpartition(".")
-            if not dot:
-                stem, ext = name, ""
-            path = os.path.join(self.downloads_dir, f"{stem}-{counter}{dot}{ext}")
-            counter += 1
-        return path
+        counter = 0
+        while True:
+            if counter == 0:
+                path = os.path.join(self.downloads_dir, name)
+            else:
+                stem, dot, ext = name.rpartition(".")
+                if not dot:
+                    stem, ext = name, ""
+                path = os.path.join(
+                    self.downloads_dir, f"{stem}-{counter}{dot}{ext}"
+                )
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                counter += 1
+                continue
+            os.close(fd)
+            return path
 
-    def _unique_final_name(self, base: str) -> str:
-        path = base
-        counter = 1
-        while os.path.exists(path):
-            path = f"{base}-{counter}"
-            counter += 1
-        return path
-
-    def _update(self, transfer: _Incoming) -> None:
-        self.emit("transfer_rx", snapshot=transfer.snapshot())
+    def _update(self, stream: _Stream) -> None:
+        self.emit("transfer_rx", snapshot=stream.snapshot())

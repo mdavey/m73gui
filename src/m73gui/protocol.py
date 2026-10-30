@@ -1,4 +1,4 @@
-"""M73G application protocol: envelope, chat and file encode/decode.
+"""M73G application protocol: envelope, chat and rsfec file-block codec.
 
 Compact little-endian binary envelope designed to fit inside the smallest
 modem73 payload (170 B RDM frames):
@@ -13,28 +13,18 @@ from __future__ import annotations
 import re
 import secrets
 import struct
-import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .constants import (
     CHAT_FROM_MAX_LEN,
-    CODE_RATES,
     FILE_NAME_MAX_BYTES,
-    FILE_START_FIXED_TAIL,
-    FRAME_SIZE_INDEX,
     HEADER_LEN,
     KISS_OVERHEAD,
     KIND_CHAT,
-    KIND_FILE_CHUNK,
-    KIND_FILE_END,
-    KIND_FILE_START,
+    KIND_FILE_BLOCK,
     M73G_MAGIC,
     M73G_VERSION,
-    OFDM_MODULATIONS,
-    ROBUST_MODE_MTU,
 )
-
-assert FILE_START_FIXED_TAIL + HEADER_LEN + FILE_NAME_MAX_BYTES == 135
 
 
 class ProtocolError(ValueError):
@@ -205,153 +195,49 @@ class ChatReassembler:
 
 
 # --------------------------------------------------------------------------
-# FILE_START
+# FILE_BLOCK: fec_level u8 | total_packets u32 | block bytes[B]
 #
-# body: file_size u64 | chunk_size u32 | total_chunks u32 | name_len u8 |
-#       name bytes | sha256 32B | modem_type u8 | modulation u8 | code_rate u8 |
-#       frame_size u8 | mfsk_mode u8 | robust_mode u8 | flags u8 | reserved u8
+# A file transfer is just a stream of these: block i of the packed rsfec
+# container has envelope seq == i, and every packet repeats the FEC level and
+# the packet total so any single frame bootstraps a receiver. No start/end
+# frames exist.
 
-@dataclass
-class FileStart:
-    file_size: int
-    chunk_size: int
-    total_chunks: int
-    name: str
-    sha256: bytes
-    modem_type: int
-    modulation: int
-    code_rate: int
-    frame_size: int
-    mfsk_mode: int
-    robust_mode: int
-    flags: int
-    transfer_id: int = 0
-
-    def target_mtu(self) -> int:
-        if self.modem_type == 2:
-            return ROBUST_MODE_MTU.get(self.robust_mode, 170)
-        return 6144  # OFDM/MFSK large modes; validated against receiver config
+FILE_BLOCK_BODY = struct.Struct("<BI")
 
 
-def _idx(table: list[str], value: str | None) -> int:
-    try:
-        return table.index(value)
-    except ValueError:
-        return 0
-
-
-def encode_file_start(
-    transfer_id: int,
-    file_size: int,
-    chunk_size: int,
-    total_chunks: int,
-    name: str,
-    sha256: bytes,
-    settings: dict,
-    flags: int,
+def encode_file_block(
+    transfer_id: int, seq: int, fec: int, total: int, block: bytes
 ) -> bytes:
-    name_bytes = sanitize_filename(name).encode("utf-8")[:FILE_NAME_MAX_BYTES]
-    if len(sha256) != 32:
-        raise ProtocolError("sha256 must be 32 bytes")
-    body = struct.pack(
-        "<QIIB", file_size, chunk_size, total_chunks, len(name_bytes)
-    )
-    body += name_bytes + sha256
-    body += struct.pack(
-        "<8B",
-        int(settings.get("modem_type", 0)),
-        _idx(OFDM_MODULATIONS, settings.get("modulation")),
-        _idx(CODE_RATES, settings.get("code_rate")),
-        FRAME_SIZE_INDEX.get(str(settings.get("frame_size", "normal")), 1),
-        int(settings.get("mfsk_mode", 0)),
-        int(settings.get("robust_mode", 0)),
-        flags,
-        0,
-    )
-    return encode_envelope(KIND_FILE_START, transfer_id, 0, body)
-
-
-def file_start_max_size() -> int:
-    return HEADER_LEN + FILE_START_FIXED_TAIL + FILE_NAME_MAX_BYTES
-
-
-def decode_file_start(env: Envelope) -> FileStart:
-    body = env.body
-    tail = 32 + 8
-    if len(body) < 8 + 4 + 4 + 1 + tail:
-        raise ProtocolError("file_start too short")
-    file_size, chunk_size, total_chunks, name_len = struct.unpack_from("<QIIB", body, 0)
-    if name_len == 0:
-        raise ProtocolError("empty file name")
-    expected = 17 + name_len + tail
-    if len(body) != expected:
-        raise ProtocolError(
-            f"file_start length {len(body)} != expected {expected}"
-        )
-    offset = 17
-    name = body[offset : offset + name_len].decode("utf-8", "replace")
-    offset += name_len
-    sha256 = body[offset : offset + 32]
-    offset += 32
-    fields = struct.unpack_from("<8B", body, offset)
-    return FileStart(
-        file_size=file_size,
-        chunk_size=chunk_size,
-        total_chunks=total_chunks,
-        name=name,
-        sha256=sha256,
-        modem_type=fields[0],
-        modulation=fields[1],
-        code_rate=fields[2],
-        frame_size=fields[3],
-        mfsk_mode=fields[4],
-        robust_mode=fields[5],
-        flags=fields[6],
-        transfer_id=env.transfer_id,
-    )
-
-
-# --------------------------------------------------------------------------
-# FILE_CHUNK: crc32 u32 LE | data
-
-def encode_file_chunk(transfer_id: int, index: int, data: bytes) -> bytes:
-    body = struct.pack("<I", zlib.crc32(data) & 0xFFFFFFFF) + data
-    return encode_envelope(KIND_FILE_CHUNK, transfer_id, index, body)
-
-
-def decode_file_chunk(env: Envelope) -> tuple[bytes, bool]:
-    if len(env.body) < 4:
-        raise ProtocolError("file_chunk too short")
-    (crc,) = struct.unpack_from("<I", env.body, 0)
-    data = env.body[4:]
-    return data, (zlib.crc32(data) & 0xFFFFFFFF) == crc
-
-
-# --------------------------------------------------------------------------
-# FILE_END: total_chunks u32 | sha256 32B
-
-def encode_file_end(transfer_id: int, total_chunks: int, sha256: bytes) -> bytes:
-    if len(sha256) != 32:
-        raise ProtocolError("sha256 must be 32 bytes")
+    if fec not in (1, 2, 3, 4):
+        raise ProtocolError(f"invalid FEC level {fec!r} (expected 1..4)")
+    if not 1 <= total <= 0xFFFFFFFF:
+        raise ProtocolError("total_packets out of range")
+    if not block:
+        raise ProtocolError("empty file block")
     return encode_envelope(
-        KIND_FILE_END, transfer_id, 0, struct.pack("<I", total_chunks) + sha256
+        KIND_FILE_BLOCK, transfer_id, seq, FILE_BLOCK_BODY.pack(fec, total) + block
     )
 
 
-def decode_file_end(env: Envelope) -> tuple[int, bytes]:
-    if len(env.body) != 4 + 32:
-        raise ProtocolError("file_end wrong length")
-    (total,) = struct.unpack_from("<I", env.body, 0)
-    return total, env.body[4:]
+def decode_file_block(env: Envelope) -> tuple[int, int, bytes]:
+    """Return (fec_level, total_packets, block) for a FILE_BLOCK envelope."""
+    if len(env.body) <= FILE_BLOCK_BODY.size:
+        raise ProtocolError("file_block too short")
+    fec, total = FILE_BLOCK_BODY.unpack_from(env.body, 0)
+    if fec not in (1, 2, 3, 4):
+        raise ProtocolError(f"bad FEC level {fec} in file_block")
+    if total < 1:
+        raise ProtocolError("file_block total_packets == 0")
+    return fec, total, env.body[FILE_BLOCK_BODY.size :]
 
 
 # --------------------------------------------------------------------------
 # Sizing / sanitization
 
-def chunk_size_for(payload_size: int) -> int:
-    """Usable file data bytes per KISS frame: payload_size - 20."""
-    size = payload_size - KISS_OVERHEAD - HEADER_LEN - 4
-    if size < 1:
+def block_size_for(payload_size: int) -> int:
+    """Usable rsfec block bytes per KISS frame: payload_size - 21."""
+    size = payload_size - KISS_OVERHEAD - HEADER_LEN - FILE_BLOCK_BODY.size
+    if size < 32:
         raise ProtocolError(f"payload_size {payload_size} too small")
     return size
 

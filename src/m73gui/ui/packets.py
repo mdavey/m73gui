@@ -265,12 +265,7 @@ class PacketsTab(ctk.CTkFrame):
 
 def describe_payload(payload: bytes) -> str:
     from .. import protocol
-    from ..constants import (
-        KIND_CHAT,
-        KIND_FILE_CHUNK,
-        KIND_FILE_END,
-        KIND_FILE_START,
-    )
+    from ..constants import KIND_CHAT, KIND_FILE_BLOCK
 
     try:
         env = protocol.decode_envelope(payload)
@@ -289,18 +284,11 @@ def describe_payload(payload: bytes) -> str:
                 f"chat from {part.from_call}: part {part.index + 1}/{part.parts}: "
                 f"{part.text!r}"
             )
-        elif env.kind == KIND_FILE_START:
-            fs = protocol.decode_file_start(env)
+        elif env.kind == KIND_FILE_BLOCK:
+            fec, total, block = protocol.decode_file_block(env)
             lines.append(
-                f"file_start name={fs.name!r} size={fs.file_size} "
-                f"chunks={fs.total_chunks}x{fs.chunk_size} flags={fs.flags:#04x}"
+                f"file_block {env.seq + 1}/{total}: fec=L{fec} {len(block)} B"
             )
-        elif env.kind == KIND_FILE_CHUNK:
-            data, ok = protocol.decode_file_chunk(env)
-            lines.append(f"chunk {env.seq}: {len(data)} B crc_ok={ok}")
-        elif env.kind == KIND_FILE_END:
-            total, sha = protocol.decode_file_end(env)
-            lines.append(f"file_end total={total} sha256={sha.hex()[:16]}…")
     except protocol.ProtocolError as exc:
         lines.append(f"malformed body: {exc}")
     return "\n".join(lines)

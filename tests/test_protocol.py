@@ -7,9 +7,7 @@ from m73gui import protocol as p
 from m73gui.constants import (
     HEADER_LEN,
     KIND_CHAT,
-    KIND_FILE_CHUNK,
-    KIND_FILE_END,
-    KIND_FILE_START,
+    KIND_FILE_BLOCK,
     M73G_MAGIC,
 )
 
@@ -24,7 +22,7 @@ class FakeClock:
 
 class EnvelopeTest(unittest.TestCase):
     def test_roundtrip_all_kinds(self):
-        for kind in (KIND_CHAT, KIND_FILE_START, KIND_FILE_CHUNK, KIND_FILE_END):
+        for kind in (KIND_CHAT, KIND_FILE_BLOCK):
             env = p.encode_envelope(kind, 0xDEADBEEF, 42, b"\x00\x01body")
             self.assertEqual(env[:4], M73G_MAGIC)
             self.assertEqual(len(env), HEADER_LEN + 6)
@@ -128,106 +126,57 @@ class ChatTest(unittest.TestCase):
             p.decode_chat(env)
 
 
-class FileStartTest(unittest.TestCase):
-    SETTINGS = {
-        "modem_type": 2,
-        "modulation": "QAM64",
-        "code_rate": "3/4",
-        "frame_size": "normal",
-        "mfsk_mode": 1,
-        "robust_mode": 5,
-    }
-
-    def test_fits_170_byte_payload_with_max_name(self):
-        name = "n" * 64
-        frame = p.encode_file_start(
-            1, 1234, 12, 100, name, b"\xab" * 32, self.SETTINGS, flags=2
-        )
-        self.assertLessEqual(len(frame), 170 - 2)
-        self.assertEqual(p.file_start_max_size(), 135)
-
+class FileBlockTest(unittest.TestCase):
     def test_roundtrip(self):
-        frame = p.encode_file_start(
-            7, 2**40, 150, 300, "data.txt", b"\x01" * 32, self.SETTINGS, flags=3
-        )
-        fs = p.decode_file_start(p.decode_envelope(frame))
-        self.assertEqual(fs.file_size, 2**40)
-        self.assertEqual(fs.chunk_size, 150)
-        self.assertEqual(fs.total_chunks, 300)
-        self.assertEqual(fs.name, "data.txt")
-        self.assertEqual(fs.sha256, b"\x01" * 32)
-        self.assertEqual(fs.modem_type, 2)
-        self.assertEqual(fs.modulation, 4)  # QAM64 index
-        self.assertEqual(fs.code_rate, 2)  # 3/4 index
-        self.assertEqual(fs.mfsk_mode, 1)
-        self.assertEqual(fs.robust_mode, 5)
-        self.assertEqual(fs.flags, 3)
+        data = bytes(range(256)) * 4
+        frame = p.encode_file_block(3, 17, 2, 400, data)
+        env = p.decode_envelope(frame)
+        self.assertEqual(env.kind, KIND_FILE_BLOCK)
+        self.assertEqual(env.transfer_id, 3)
+        self.assertEqual(env.seq, 17)
+        fec, total, block = p.decode_file_block(env)
+        self.assertEqual(fec, 2)
+        self.assertEqual(total, 400)
+        self.assertEqual(block, data)
+        self.assertEqual(len(frame), HEADER_LEN + 5 + len(data))
 
-    def test_unknown_strings_map_to_zero(self):
-        frame = p.encode_file_start(
-            7, 10, 10, 1, "f", b"\x00" * 32,
-            {"modulation": "NOPE", "code_rate": "9/9"}, flags=0,
-        )
-        fs = p.decode_file_start(p.decode_envelope(frame))
-        self.assertEqual(fs.modulation, 0)
-        self.assertEqual(fs.code_rate, 0)
-
-    def test_bad_lengths_rejected(self):
-        env = p.Envelope(KIND_FILE_START, 1, 0, b"\x00" * 20)
+    def test_encode_rejects_bad_args(self):
         with self.assertRaises(p.ProtocolError):
-            p.decode_file_start(env)
-        # name_len inconsistent with body
-        body = struct.pack("<QIIB", 5, 5, 1, 90) + b"x" * 10 + b"\x00" * 40
-        env = p.Envelope(KIND_FILE_START, 1, 0, body)
+            p.encode_file_block(1, 0, 0, 5, b"x")   # fec below range
         with self.assertRaises(p.ProtocolError):
-            p.decode_file_start(env)
-
-    def test_bad_sha_rejected(self):
+            p.encode_file_block(1, 0, 5, 5, b"x")   # fec above range
         with self.assertRaises(p.ProtocolError):
-            p.encode_file_start(1, 1, 1, 1, "f", b"short", {}, 0)
+            p.encode_file_block(1, 0, 2, 0, b"x")   # total zero
+        with self.assertRaises(p.ProtocolError):
+            p.encode_file_block(1, 0, 2, 5, b"")    # empty block
+
+    def test_decode_rejects_bad_bodies(self):
+        with self.assertRaises(p.ProtocolError):
+            p.decode_file_block(p.Envelope(KIND_FILE_BLOCK, 1, 0, b"\x00" * 5))
+        body = struct.pack("<BI", 9, 5) + b"x" * 32  # bad fec level
+        with self.assertRaises(p.ProtocolError):
+            p.decode_file_block(p.Envelope(KIND_FILE_BLOCK, 1, 0, body))
+        body = struct.pack("<BI", 2, 0) + b"x" * 32  # total zero
+        with self.assertRaises(p.ProtocolError):
+            p.decode_file_block(p.Envelope(KIND_FILE_BLOCK, 1, 0, body))
 
 
-class ChunkSizeTest(unittest.TestCase):
+class BlockSizeTest(unittest.TestCase):
     def test_formula(self):
-        self.assertEqual(p.chunk_size_for(170), 150)
-        self.assertEqual(p.chunk_size_for(256), 236)
-        self.assertEqual(p.chunk_size_for(512), 492)
-        self.assertEqual(p.chunk_size_for(6144), 6124)
+        # payload - KISS(2) - envelope(14) - body header(5)
+        self.assertEqual(p.block_size_for(170), 149)
+        self.assertEqual(p.block_size_for(256), 235)
+        self.assertEqual(p.block_size_for(512), 491)
+        self.assertEqual(p.block_size_for(6144), 6123)
 
     def test_too_small(self):
         with self.assertRaises(p.ProtocolError):
-            p.chunk_size_for(16)
-
-
-class FileChunkEndTest(unittest.TestCase):
-    def test_chunk_roundtrip(self):
-        data = bytes(range(256)) * 4
-        frame = p.encode_file_chunk(3, 17, data)
-        env = p.decode_envelope(frame)
-        self.assertEqual(env.kind, KIND_FILE_CHUNK)
-        self.assertEqual(env.seq, 17)
-        out, ok = p.decode_file_chunk(env)
-        self.assertTrue(ok)
-        self.assertEqual(out, data)
-
-    def test_chunk_crc_detects_corruption(self):
-        data = b"payload"
-        frame = bytearray(p.encode_file_chunk(3, 0, data))
-        frame[-1] ^= 0xFF
-        out, ok = p.decode_file_chunk(p.decode_envelope(bytes(frame)))
-        self.assertFalse(ok)
-
-    def test_end_roundtrip(self):
-        sha = bytes(range(32))
-        frame = p.encode_file_end(3, 1234, sha)
-        total, out_sha = p.decode_file_end(p.decode_envelope(frame))
-        self.assertEqual(total, 1234)
-        self.assertEqual(out_sha, sha)
-
-    def test_end_bad_length(self):
-        env = p.Envelope(KIND_FILE_END, 1, 0, b"\x00" * 10)
+            p.block_size_for(52)  # 31 B block < 32 floor
         with self.assertRaises(p.ProtocolError):
-            p.decode_file_end(env)
+            p.block_size_for(16)
+
+    def test_floor_boundary_ok(self):
+        self.assertEqual(p.block_size_for(53), 32)
 
 
 class SanitizeTest(unittest.TestCase):

@@ -1,29 +1,25 @@
 from __future__ import annotations
 
-import hashlib
 import os
-import queue
 import shutil
 import tempfile
 import threading
 import time
 import unittest
 
+import rsfec
+
 from m73gui import protocol
 from m73gui.constants import (
-    KIND_FILE_CHUNK,
-    KIND_FILE_END,
-    KIND_FILE_START,
+    FILE_MAX_BLOCKS,
+    FILE_MAX_BYTES,
+    KIND_FILE_BLOCK,
 )
-from m73gui.services.transfers import (
-    FileSender,
-    IncomingFiles,
-    target_settings,
-)
+from m73gui.services.transfers import FileSender, IncomingFiles
 from m73gui.state import (
+    INCOMING_ACTIVE,
     INCOMING_COMPLETE,
-    INCOMING_CORRUPT,
-    INCOMING_INCOMPLETE,
+    INCOMING_FAILED,
     TX_CANCELLED,
     TX_FAILED,
     TX_SENT,
@@ -41,6 +37,8 @@ BASE_CONFIG = {
     "postamble": False,
 }
 
+BLOCK = protocol.block_size_for(BASE_CONFIG["payload_size"])  # 491
+
 
 class FakeStation:
     """Fake modem73: config, status, KISS sink."""
@@ -52,7 +50,6 @@ class FakeStation:
             "channel_state": "idle",
         }
         self.sent: list[bytes] = []
-        self.set_calls: list[dict] = []
         self.link_up = True
         self._lock = threading.Lock()
 
@@ -70,11 +67,6 @@ class FakeStation:
         if not self.link_up:
             return None
         return dict(self.config)
-
-    def set_config(self, fields: dict) -> bool:
-        self.set_calls.append(dict(fields))
-        self.config.update(fields)
-        return True
 
     def decoded(self):
         out = []
@@ -124,8 +116,8 @@ class SenderTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def make_file(self, size, seed=b"f"):
-        path = os.path.join(self.tmp, "payload.bin")
+    def make_file(self, size, seed=b"f", name="payload.bin"):
+        path = os.path.join(self.tmp, name)
         with open(path, "wb") as fh:
             fh.write((seed * (size + 1))[:size])
         return path
@@ -143,14 +135,9 @@ class SenderTest(unittest.TestCase):
         sender._test_abort = abort
         return sender
 
-    def last_tx_status(self):
-        for kind, data in reversed(self.events):
-            if kind == "transfer_tx":
-                return data["snapshot"]
-        return None
-
-    def run_sender(self, sender, path):
-        sender.start(path)
+    def run_sender(self, sender, path, fec=2):
+        error = sender.start(path, fec=fec)
+        self.assertIsNone(error)
         self.assertTrue(
             wait_until(lambda: sender.snapshot.status in
                        (TX_SENT, TX_FAILED, TX_CANCELLED) or not sender.busy()),
@@ -158,62 +145,87 @@ class SenderTest(unittest.TestCase):
         )
         sender._thread.join(timeout=2)
 
+    def collect_blocks(self, station):
+        """(transfer_id, fec, total, {seq: block}) from sent frames."""
+        blocks = {}
+        tids = set()
+        fecs = set()
+        totals = set()
+        for env in station.by_kind(KIND_FILE_BLOCK):
+            fec, total, block = protocol.decode_file_block(env)
+            tids.add(env.transfer_id)
+            fecs.add(fec)
+            totals.add(total)
+            self.assertIsNone(blocks.get(env.seq))  # each seq sent once
+            blocks[env.seq] = block
+        self.assertEqual(len(tids), 1)
+        self.assertEqual(len(fecs), 1)
+        self.assertEqual(len(totals), 1)
+        return tids.pop(), fecs.pop(), totals.pop(), blocks
+
     def test_normal_transfer_frames(self):
         station = FakeStation()
         path = self.make_file(1000)
-        sha = hashlib.sha256(open(path, "rb").read()).digest()
         sender = self.make_sender(station)
         self.run_sender(sender, path)
         self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
 
-        starts = station.by_kind(KIND_FILE_START)
-        ends = station.by_kind(KIND_FILE_END)
-        chunks = station.by_kind(KIND_FILE_CHUNK)
+        tid, fec, total, blocks = self.collect_blocks(station)
+        self.assertEqual(fec, 2)
+        self.assertEqual(total, sender.snapshot.total_blocks)
+        self.assertEqual(sorted(blocks), list(range(total)))
+        # no start/end frames anymore, only blocks
+        self.assertEqual(len(station.sent), total)
 
-        chunk_size = protocol.chunk_size_for(BASE_CONFIG["payload_size"])  # 492
-        total = 3  # ceil(1000/492)
-        self.assertEqual(len(starts), 2)
-        self.assertEqual(len(ends), 2)
-        self.assertEqual(len(chunks), total)
-        tid = starts[0].transfer_id
-        self.assertEqual(len({c.transfer_id for c in chunks + starts + ends}), 1)
-        fs = protocol.decode_file_start(starts[0])
-        self.assertEqual(fs.file_size, 1000)
-        self.assertEqual(fs.chunk_size, chunk_size)
-        self.assertEqual(fs.total_chunks, total)
-        self.assertEqual(fs.sha256, sha)
-        self.assertEqual(fs.flags, 0)
-        self.assertEqual(fs.modem_type, 0)
-        self.assertEqual(fs.modulation, 1)  # QPSK
-
-        # chunk payloads reassemble the original file
+        # the block stream IS the container: unpack recovers the file
+        stream = b"".join(blocks[i] for i in range(total))
+        unpacked = rsfec.unpack(stream, block_size=BLOCK, fec=fec)
+        self.assertEqual(unpacked.name, "payload.bin")
         with open(path, "rb") as fh:
-            expected = fh.read()
-        data = bytearray()
-        for env in sorted(chunks, key=lambda e: e.seq):
-            chunk, ok = protocol.decode_file_chunk(env)
-            self.assertTrue(ok)
-            data += chunk
-        self.assertEqual(bytes(data), expected)
-        total_out, sha_out = protocol.decode_file_end(ends[0])
-        self.assertEqual(total_out, total)
-        self.assertEqual(sha_out, sha)
-        self.assertEqual(sender.snapshot.sent_chunks, total)
+            self.assertEqual(unpacked.data, fh.read())
+        self.assertEqual(sender.snapshot.sent_blocks, total)
+        self.assertEqual(sender.snapshot.sent_bytes, 1000)
         self.assertIn(tid, self.outgoing_ids)
 
-    def test_empty_file(self):
+    def test_fec_levels(self):
+        for fec, min_extra in ((1, 1), (2, 1), (3, 1), (4, 1)):
+            station = FakeStation()
+            path = self.make_file(3000, seed=b"x")
+            sender = self.make_sender(station)
+            self.run_sender(sender, path, fec=fec)
+            self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
+            _tid, fec_out, total, blocks = self.collect_blocks(station)
+            self.assertEqual(fec_out, fec)
+            self.assertGreater(total, 3000 // BLOCK + 1)  # parity included
+            stream = b"".join(blocks[i] for i in range(total))
+            unpacked = rsfec.unpack(stream, block_size=BLOCK, fec=fec)
+            self.assertEqual(len(unpacked.data), 3000)
+
+    def test_rejects_empty_file(self):
         station = FakeStation()
-        path = self.make_file(0)
         sender = self.make_sender(station)
-        self.run_sender(sender, path)
-        self.assertEqual(sender.snapshot.status, TX_SENT)
-        self.assertEqual(len(station.by_kind(KIND_FILE_CHUNK)), 0)
-        self.assertEqual(len(station.by_kind(KIND_FILE_START)), 2)
-        self.assertEqual(len(station.by_kind(KIND_FILE_END)), 2)
+        error = sender.start(self.make_file(0))
+        self.assertIsNotNone(error)
+        self.assertIn("empty", error)
+        self.assertEqual(len(station.sent), 0)
+
+    def test_rejects_oversized_file(self):
+        path = os.path.join(self.tmp, "big.bin")
+        with open(path, "wb") as fh:
+            fh.truncate(FILE_MAX_BYTES + 1)  # sparse file
+        sender = self.make_sender(station := FakeStation())
+        error = sender.start(path)
+        self.assertIsNotNone(error)
+        self.assertIn("too large", error)
+        self.assertEqual(len(station.sent), 0)
+
+    def test_rejects_bad_fec(self):
+        sender = self.make_sender(FakeStation())
+        self.assertIsNotNone(sender.start(self.make_file(10), fec=7))
 
     def test_kiss_loss_aborts(self):
         station = FakeStation()
-        path = self.make_file(492 * 40)
+        path = self.make_file(BLOCK * 40)
 
         orig = station.send_frame
 
@@ -229,10 +241,10 @@ class SenderTest(unittest.TestCase):
 
     def test_cancel(self):
         station = FakeStation()
-        path = self.make_file(492 * 200)
+        path = self.make_file(BLOCK * 200)
         sender = self.make_sender(station)
         sender.start(path)
-        wait_until(lambda: len(station.by_kind(KIND_FILE_CHUNK)) > 0)
+        wait_until(lambda: len(station.by_kind(KIND_FILE_BLOCK)) > 0)
         sender.cancel()
         self.assertTrue(wait_until(lambda: sender.snapshot.status == TX_CANCELLED))
 
@@ -254,8 +266,8 @@ class SenderTest(unittest.TestCase):
         self.run_sender(sender, path)
         self.assertEqual(sender.snapshot.status, TX_FAILED)
         self.assertIn("payload", sender.snapshot.message)
-        # no chunks were sent
-        self.assertEqual(len(station.by_kind(KIND_FILE_CHUNK)), 0)
+        # no blocks were sent
+        self.assertEqual(len(station.by_kind(KIND_FILE_BLOCK)), 0)
 
 
 class ReceiverTest(unittest.TestCase):
@@ -282,192 +294,196 @@ class ReceiverTest(unittest.TestCase):
     def snapshots(self):
         return [d["snapshot"] for k, d in self.events if k == "transfer_rx"]
 
-    def wait_status(self, tid, status, timeout=5.0):
-        ok = wait_until(
-            lambda: self.files.transfers.get(tid)
-            and self.files.transfers[tid].status == status
-        )
-        self.assertTrue(ok, f"transfer {tid} never reached {status}")
+    def get(self, sender, tid):
+        return self.files.streams.get((sender, tid))
 
-    def broadcast(self, data: bytes, name="file.bin", drop: set[int] = frozenset(),
-                  tid: int | None = None, duplicates=(), corrupt=(), start_times=2):
-        payload_size = 512
-        chunk_size = protocol.chunk_size_for(payload_size)
+    def wait_status(self, sender, tid, status, timeout=8.0):
+        # the app pump normally drives sweep(); emulate it here so idle
+        # streams reach their repair attempt
+        def probe():
+            self.files.sweep()
+            stream = self.get(sender, tid)
+            return stream is not None and stream.status == status
+
+        ok = wait_until(probe, timeout=timeout)
+        self.assertTrue(ok, f"stream {sender}/{tid} never reached {status}")
+
+    def pack(self, data, name="file.bin", fec=2):
+        return rsfec.pack_bytes(data, name=name, block_size=BLOCK, fec=fec)
+
+    def broadcast(self, data, name="file.bin", drop=frozenset(),
+                  tid=None, duplicates=(), sender="VK9RX", fec=2):
         tid = tid or protocol.new_transfer_id()
-        sha = hashlib.sha256(data).digest()
-        total = (len(data) + chunk_size - 1) // chunk_size if data else 0
-        settings = target_settings(BASE_CONFIG)
-        start = protocol.encode_file_start(
-            tid, len(data), chunk_size, total, name, sha, settings, flags=0
-        )
-        for _ in range(start_times):
-            self.files.handle_start(
-                protocol.decode_envelope(start), protocol.decode_file_start(
-                    protocol.decode_envelope(start)), sender="VK9RX"
-            )
+        packed = self.pack(data, name=name, fec=fec)
+        total = packed.total_blocks
         for i in range(total):
-            chunk = data[i * chunk_size : (i + 1) * chunk_size]
-            if i in corrupt:
-                env = protocol.decode_envelope(
-                    protocol.encode_envelope(
-                        KIND_FILE_CHUNK, tid, i, b"\xff\xff\xff\xff" + chunk
-                    )
-                )
-            elif i in drop:
+            if i in drop:
                 continue
-            else:
-                env = protocol.decode_envelope(
-                    protocol.encode_file_chunk(tid, i, chunk)
-                )
-            self.files.handle_chunk(env)
+            block = packed.stream[i * BLOCK : (i + 1) * BLOCK]
+            env = protocol.decode_envelope(
+                protocol.encode_file_block(tid, i, fec, total, block)
+            )
+            self.files.handle_block(env, fec, total, block, sender=sender)
             if i in duplicates:
-                self.files.handle_chunk(env)
-        end = protocol.decode_envelope(protocol.encode_file_end(tid, total, sha))
-        self.files.handle_end(end)
-        return tid, sha
+                self.files.handle_block(env, fec, total, block, sender=sender)
+        return tid, packed
 
     def test_complete_transfer(self):
         data = os.urandom(2000)
-        tid, sha = self.broadcast(data)
-        self.wait_status(tid, INCOMING_COMPLETE)
-        t = self.files.transfers[tid]
-        self.assertEqual(t.received, 5)  # ceil(2000/492)
-        final = t.path
-        self.assertFalse(final.endswith(".part"))
-        self.assertEqual(open(final, "rb").read(), data)
-        self.assertEqual(os.path.dirname(final), os.path.join(self.tmp, "dl"))
+        tid, packed = self.broadcast(data)
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE)
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(len(stream.received), packed.total_blocks)
+        self.assertFalse(stream.path.endswith(".part"))
+        with open(stream.path, "rb") as fh:
+            self.assertEqual(fh.read(), data)
+        self.assertEqual(os.path.dirname(stream.path), os.path.join(self.tmp, "dl"))
 
-    def test_dropped_chunks_incomplete(self):
+    def test_dropped_blocks_repaired_after_idle(self):
+        # data+header spans 5 data blocks -> L2 gives 1 parity per group
         data = os.urandom(2000)
-        tid, _ = self.broadcast(data, drop={1})
-        self.wait_status(tid, INCOMING_INCOMPLETE)
-        t = self.files.transfers[tid]
-        self.assertEqual(t.received, 4)
-        self.assertTrue(t.path.endswith(".part"))
-        # FILE_END with missing chunks marks incomplete immediately (no sweep)
+        tid, packed = self.broadcast(data, drop={1})
+        self.assertEqual(len(self.get("VK9RX", tid).received), packed.total_blocks - 1)
+        # sweep sees the idle stream and repairs from parity
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE, timeout=8.0)
+        stream = self.get("VK9RX", tid)
+        with open(stream.path, "rb") as fh:
+            self.assertEqual(fh.read(), data)
+        self.assertIn("repairing", " ".join(
+            s.message for s in self.snapshots()
+        ))
+
+    def test_over_budget_marks_failed(self):
+        data = os.urandom(2000)
+        # two blocks of a group with parity 1 is beyond the budget
+        tid, _packed = self.broadcast(data, drop={0, 1})
+        self.wait_status("VK9RX", tid, INCOMING_FAILED, timeout=8.0)
         snaps = self.snapshots()
-        self.assertTrue(any(s.status == INCOMING_INCOMPLETE for s in snaps))
+        self.assertTrue(any(s.status == INCOMING_FAILED for s in snaps))
+        self.assertTrue(any("unrecoverable" in s.message for s in snaps))
 
-    def test_timeout_marks_incomplete(self):
+    def test_late_blocks_revive_failed_stream(self):
+        data = os.urandom(2000)
+        tid, packed = self.broadcast(data, drop={0, 1})
+        self.wait_status("VK9RX", tid, INCOMING_FAILED, timeout=8.0)
+        # resend the whole thing; the second pass completes it cleanly
+        self.broadcast(data, tid=tid)
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE, timeout=8.0)
+        stream = self.get("VK9RX", tid)
+        with open(stream.path, "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+    def test_duplicates_ignored(self):
         data = os.urandom(1500)
-        chunk_size = protocol.chunk_size_for(512)
+        tid, packed = self.broadcast(data, duplicates={0, 2})
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE)
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(len(stream.received), packed.total_blocks)
+
+    def test_seq_beyond_total_and_mismatch_ignored(self):
+        data = os.urandom(1500)
+        tid, packed = self.broadcast(data)
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE)
+        before = len(self.get("VK9RX", tid).received)
+        # out-of-range seq on a fresh-looking stream with same key is ignored
+        # (completed streams keep no writable slack)
+        env = protocol.decode_envelope(
+            protocol.encode_file_block(tid, packed.total_blocks + 5, 2,
+                                       packed.total_blocks, b"\x00" * BLOCK)
+        )
+        self.files.handle_block(
+            env, 2, packed.total_blocks, b"\x00" * BLOCK, sender="VK9RX"
+        )
+        # same tid but a different block size is a mismatch -> ignored
+        env = protocol.decode_envelope(
+            protocol.encode_file_block(tid, 0, 2, packed.total_blocks, b"\x00" * 64)
+        )
+        self.files.handle_block(
+            env, 2, packed.total_blocks, b"\x00" * 64, sender="VK9RX"
+        )
+        self.assertEqual(len(self.get("VK9RX", tid).received), before)
+
+    def test_name_revealed_from_block_zero(self):
+        data = os.urandom(2000)
         tid = protocol.new_transfer_id()
-        sha = hashlib.sha256(data).digest()
-        start = protocol.encode_file_start(
-            tid, len(data), chunk_size, 4, "t.bin", sha,
-            target_settings(BASE_CONFIG), flags=0,
+        packed = self.pack(data, name="peek.txt")
+        total = packed.total_blocks
+        block = packed.stream[0:BLOCK]
+        env = protocol.decode_envelope(
+            protocol.encode_file_block(tid, 0, 2, total, block)
         )
-        self.files.handle_start(
-            protocol.decode_envelope(start),
-            protocol.decode_file_start(protocol.decode_envelope(start)),
-        )
-        self.files.handle_chunk(
-            protocol.decode_envelope(
-                protocol.encode_file_chunk(tid, 0, data[:chunk_size])
-            )
-        )
-        # no FILE_END; sweep after idle timeout
-        time.sleep(0.35)
-        self.files.sweep()
-        self.assertEqual(self.files.transfers[tid].status, INCOMING_INCOMPLETE)
-        self.assertTrue(self.files.transfers[tid].path.endswith(".part"))
+        self.files.handle_block(env, 2, total, block, sender="VK9RX")
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(stream.name, "peek.txt")
+        self.assertEqual(stream.file_size, 2000)
+        self.assertEqual(stream.total, total)
 
-    def test_duplicates_and_corrupt_chunks(self):
-        data = os.urandom(492 * 3)
-        tid, _ = self.broadcast(data, duplicates={0}, corrupt={1})
-        self.wait_status(tid, INCOMING_INCOMPLETE)
-        t = self.files.transfers[tid]
-        self.assertEqual(t.dupes, 1)
-        self.assertEqual(t.corrupt, 1)
-        self.assertEqual(t.received, 2)
-
-    def test_corrupt_hash_marks_corrupt(self):
-        data = os.urandom(500)
-        tid, _ = self.broadcast(data)
-        self.wait_status(tid, INCOMING_COMPLETE)
-        # second transfer: same tid can't be reused; craft mismatch by editing
-        # file mid-stream is complex; instead assert verified-complete works and
-        # hash mismatch path via a direct _finalize on tampered .part
-        self.files.transfers.clear()
-        payload_size = 512
-        chunk_size = protocol.chunk_size_for(payload_size)
-        tid2 = protocol.new_transfer_id()
-        small = b"tamper-me"
-        start = protocol.encode_file_start(
-            tid2, len(small), chunk_size, 1, "tamper.bin", b"\x00" * 32,
-            target_settings(BASE_CONFIG), flags=0,
+    def test_snapshot_progress_from_first_packet(self):
+        data = os.urandom(2000)
+        planned = self.pack(data)
+        tid, packed = self.broadcast(
+            data, drop=set(range(1, planned.total_blocks))
         )
-        self.files.handle_start(
-            protocol.decode_envelope(start),
-            protocol.decode_file_start(protocol.decode_envelope(start)),
-        )
-        self.files.handle_chunk(
-            protocol.decode_envelope(protocol.encode_file_chunk(tid2, 0, small))
-        )
-        self.wait_status(tid2, INCOMING_CORRUPT)
-        self.assertIn("sha256 mismatch", self.files.transfers[tid2].message)
-
-    def test_empty_file_via_end(self):
-        tid, _ = self.broadcast(b"")
-        self.wait_status(tid, INCOMING_COMPLETE)
-        t = self.files.transfers[tid]
-        self.assertEqual(os.path.getsize(t.path), 0)
+        snaps = [s for s in self.snapshots() if s.transfer_id == tid]
+        first = snaps[0]
+        self.assertEqual(first.total_blocks, packed.total_blocks)
+        self.assertEqual(first.received_blocks, 1)
+        self.assertEqual(first.status, INCOMING_ACTIVE)
 
     def test_self_echo_suppressed_and_toggle(self):
         data = os.urandom(100)
         tid = protocol.new_transfer_id()
         self.outgoing_ids.add(tid)
         self.broadcast(data, tid=tid)
-        self.assertNotIn(tid, self.files.transfers)
+        self.assertIsNone(self.get("VK9RX", tid))
         # with loopback accept on, a fresh broadcast is received
         self.files.accept_self = lambda: True
-        self.files.transfers.clear()
         tid2, _ = self.broadcast(data, tid=protocol.new_transfer_id())
-        self.wait_status(tid2, INCOMING_COMPLETE)
+        self.wait_status("VK9RX", tid2, INCOMING_COMPLETE)
+
+    def test_two_senders_same_tid_isolated(self):
+        data1 = os.urandom(400)
+        data2 = os.urandom(500)
+        tid = protocol.new_transfer_id()
+        self.broadcast(data1, tid=tid, sender="AAA")
+        self.broadcast(data2, tid=tid, sender="BBB")
+        self.wait_status("AAA", tid, INCOMING_COMPLETE)
+        self.wait_status("BBB", tid, INCOMING_COMPLETE)
+        with open(self.get("AAA", tid).path, "rb") as fh:
+            self.assertEqual(fh.read(), data1)
+        with open(self.get("BBB", tid).path, "rb") as fh:
+            self.assertEqual(fh.read(), data2)
 
     def test_path_traversal_name_sanitized(self):
         data = os.urandom(50)
         tid, _ = self.broadcast(data, name="../../evil.txt")
-        self.wait_status(tid, INCOMING_COMPLETE)
-        t = self.files.transfers[tid]
-        self.assertEqual(os.path.basename(t.path), "evil.txt")
-        self.assertTrue(t.path.startswith(os.path.join(self.tmp, "dl")))
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE)
+        stream = self.get("VK9RX", tid)
+        self.assertEqual(os.path.basename(stream.path), "evil.txt")
+        self.assertTrue(stream.path.startswith(os.path.join(self.tmp, "dl")))
 
     def test_name_collision_gets_suffix(self):
         data = os.urandom(50)
         tid1, _ = self.broadcast(data, name="dup.txt")
-        self.wait_status(tid1, INCOMING_COMPLETE)
+        self.wait_status("VK9RX", tid1, INCOMING_COMPLETE)
         tid2, _ = self.broadcast(b"second!", name="dup.txt")
-        self.wait_status(tid2, INCOMING_COMPLETE)
-        t1 = self.files.transfers[tid1]
-        t2 = self.files.transfers[tid2]
-        self.assertNotEqual(t1.path, t2.path)
-        self.assertEqual(open(t2.path, "rb").read(), b"second!")
+        self.wait_status("VK9RX", tid2, INCOMING_COMPLETE)
+        p1 = self.get("VK9RX", tid1).path
+        p2 = self.get("VK9RX", tid2).path
+        self.assertNotEqual(p1, p2)
+        with open(p2, "rb") as fh:
+            self.assertEqual(fh.read(), b"second!")
 
-    def test_validation_rejects(self):
-        settings = target_settings(BASE_CONFIG)
-        chunk_size = protocol.chunk_size_for(512)
+    def test_absurd_total_rejected(self):
+        tid = protocol.new_transfer_id()
+        env = protocol.decode_envelope(
+            protocol.encode_file_block(tid, 0, 2, FILE_MAX_BLOCKS + 1, b"x" * 64)
+        )
+        self.files.handle_block(
+            env, 2, FILE_MAX_BLOCKS + 1, b"x" * 64, sender="VK9RX"
+        )
+        self.assertEqual(len(self.files.streams), 0)
 
-        def start_with(**over):
-            fields = dict(
-                file_size=10, chunk_size=chunk_size, total_chunks=1,
-                name="ok.bin", sha256=b"\x01" * 32, settings=settings, flags=0,
-            )
-            fields.update(over)
-            raw = protocol.encode_file_start(protocol.new_transfer_id(), **fields)
-            return protocol.decode_envelope(raw)
-
-        before = len(self.files.transfers)
-        # too big
-        self.files.handle_start(start_with(file_size=200 * 1024 * 1024, total_chunks=1),
-                                protocol.decode_file_start(start_with(file_size=200 * 1024 * 1024, total_chunks=1)))
-        # chunk count mismatch
-        s = start_with(total_chunks=5)
-        self.files.handle_start(s, protocol.decode_file_start(s))
-        # bad modem_type index
-        s = start_with(settings={**settings, "modem_type": 9})
-        self.files.handle_start(s, protocol.decode_file_start(s))
-        self.assertEqual(len(self.files.transfers), before)
 
 if __name__ == "__main__":
     unittest.main()

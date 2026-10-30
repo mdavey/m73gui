@@ -10,9 +10,9 @@ TX = "TX"
 RX = "RX"
 
 INCOMING_ACTIVE = "active"
+INCOMING_RECOVERING = "recovering"
 INCOMING_COMPLETE = "complete"
-INCOMING_INCOMPLETE = "incomplete"
-INCOMING_CORRUPT = "corrupt"
+INCOMING_FAILED = "failed"
 
 TX_PENDING = "pending"
 TX_SENDING = "sending"
@@ -28,7 +28,7 @@ class PacketRow:
     time: float
     direction: str
     size: int
-    kind: str = "raw"  # chat/file-start/file-chunk/file-end/raw
+    kind: str = "raw"  # chat/file-block/raw
     summary: str = ""
     callsign: str = ""
     mode: str = ""
@@ -46,39 +46,39 @@ class PacketRow:
 class OutgoingSnapshot:
     filename: str
     file_size: int
-    chunk_size: int
-    total_chunks: int
-    sent_chunks: int = 0
+    fec: int = 2
+    block_size: int = 0
+    total_blocks: int = 0
+    sent_blocks: int = 0
     sent_bytes: int = 0
     status: str = TX_PENDING
     message: str = ""
 
     @property
     def fraction(self) -> float:
-        if self.total_chunks <= 0:
+        if self.total_blocks <= 0:
             return 1.0 if self.status == TX_SENT else 0.0
-        return min(1.0, self.sent_chunks / self.total_chunks)
+        return min(1.0, self.sent_blocks / self.total_blocks)
 
 
 @dataclass
 class IncomingSnapshot:
     transfer_id: int
     sender: str
-    name: str
-    file_size: int
-    chunk_size: int
-    total_chunks: int
-    received_chunks: int = 0
-    missing_chunks: int = 0
+    name: str = ""
+    file_size: int = 0
+    block_size: int = 0
+    total_blocks: int = 0
+    received_blocks: int = 0
     status: str = INCOMING_ACTIVE
     path: str = ""
     message: str = ""
 
     @property
     def fraction(self) -> float:
-        if self.total_chunks <= 0:
+        if self.total_blocks <= 0:
             return 1.0 if self.status == INCOMING_COMPLETE else 0.0
-        return min(1.0, self.received_chunks / self.total_chunks)
+        return min(1.0, self.received_blocks / self.total_blocks)
 
 
 class AppState:

@@ -3,7 +3,7 @@
 The constants mirror modem73's frame structure (phy/common.hh,
 phy/mfsk_modem.hh, phy/robust_modem.hh) so a selected file can show an
 "honestly rough" total time. Sender pacing, CSMA waits, and retransmits
-are not modelled beyond a flat per-chunk slack.
+are not modelled beyond a flat per-frame slack.
 """
 
 from __future__ import annotations
@@ -12,9 +12,9 @@ from __future__ import annotations
 # real link: ~0.6 s between consecutive frames beyond pure airtime)
 CHUNK_OVERHEAD_S = 0.6
 
-# FILE_START and FILE_END are each broadcast twice, so every transfer pays
-# for 4 extra frames regardless of file size
-CONTROL_FRAMES = 4
+# rsfec block streams need no start/end frames; if that ever changes again,
+# account the control traffic here
+CONTROL_FRAMES = 0
 
 # used when the mode is unrecognised (same fallback modem73 uses)
 _DEFAULT_FRAME_S = 3.0
@@ -78,12 +78,11 @@ def frame_seconds(config: dict) -> float:
     return seconds
 
 
-def estimate_transfer_seconds(config: dict, chunks: int) -> float:
-    """Estimated total airtime for a broadcast of *chunks* full chunks."""
-    if chunks <= 0:
+def estimate_transfer_seconds(config: dict, frames: int) -> float:
+    """Estimated total airtime for a broadcast of *frames* full frames."""
+    if frames <= 0:
         return 0.0
-    frames = chunks + CONTROL_FRAMES
-    return frames * (frame_seconds(config) + CHUNK_OVERHEAD_S)
+    return (frames + CONTROL_FRAMES) * (frame_seconds(config) + CHUNK_OVERHEAD_S)
 
 
 def human_duration(seconds: float) -> str:
