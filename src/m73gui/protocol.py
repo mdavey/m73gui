@@ -24,6 +24,7 @@ from .constants import (
     KIND_FILE_BLOCK,
     M73G_MAGIC,
     M73G_VERSION,
+    SAFE_FILE_EXTS,
 )
 
 
@@ -270,6 +271,18 @@ def sanitize_filename(name: str) -> str:
                 "utf-8", "ignore"
             )
     return name
+
+
+def file_type_extension(name: str) -> str | None:
+    """Return an unusual extension (one outside SAFE_FILE_EXTS), or None.
+
+    A missing extension counts as unusual ("(no extension)")."""
+    if "." not in name:
+        return "(no extension)"
+    ext = name.rpartition(".")[2].lower()
+    if ext in SAFE_FILE_EXTS:
+        return None
+    return f".{ext}"
 
 
 def human_bytes(n: float) -> str:

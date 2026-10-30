@@ -179,6 +179,19 @@ class BlockSizeTest(unittest.TestCase):
         self.assertEqual(p.block_size_for(53), 32)
 
 
+class FileTypeExtensionTest(unittest.TestCase):
+    def test_safe_extensions(self):
+        for name in ("photo.PNG", "notes.md", "track.flac", "page.pdf",
+                     "zone.mmpz", "recording.s7s", "old.jpeg"):
+            self.assertIsNone(p.file_type_extension(name), name)
+
+    def test_unusual_and_missing(self):
+        self.assertEqual(p.file_type_extension("payload.exe"), ".exe")
+        self.assertEqual(p.file_type_extension("script.SH"), ".sh")
+        self.assertEqual(p.file_type_extension("README"), "(no extension)")
+        self.assertEqual(p.file_type_extension("weird.tar.gz"), ".gz")
+
+
 class SanitizeTest(unittest.TestCase):
     def test_traversal(self):
         self.assertEqual(p.sanitize_filename("../../etc/passwd"), "passwd")

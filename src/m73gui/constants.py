@@ -57,6 +57,19 @@ SPARKLINE_SAMPLES = 120  # 60 s at 500 ms
 
 DOWNLOAD_DIR_NAME = "m73gui"  # under ~/Downloads
 
+# Extensions treated as ordinary text/media/document content; anything else
+# gets a caution when sending or receiving.
+SAFE_FILE_EXTS = {
+    # text
+    "txt", "md", "csv", "log", "json", "xml", "yaml", "yml", "ini", "cfg",
+    # images
+    "png", "jpg", "jpeg", "jxl", "jpxl", "gif", "bmp", "webp", "tif", "tiff",
+    # audio
+    "wav", "mp3", "flac", "ogg", "opus", "m4a",
+    # documents and modem73-ecosystem content
+    "pdf", "epub", "s7s", "mmpz", "mid", "midi",
+}
+
 # --- Modem tables (match modem73 control port numbering) ---
 MODEM_TYPE_NAMES = {0: "OFDM", 1: "MFSK", 2: "ROBUST"}
 

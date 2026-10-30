@@ -360,6 +360,13 @@ class App:
             self.files_tab.update_incoming(snap)
             if snap.status == "complete":
                 self.notify(f"received {snap.name or '?'} → {snap.path}")
+                bad = protocol.file_type_extension(snap.name or "")
+                if bad:
+                    self.notify(
+                        f"{snap.name}: unusual file type {bad} — open only if "
+                        "you trust the sender",
+                        level="warn",
+                    )
             elif snap.status == "failed":
                 self.notify(f"incoming {snap.sender}: {snap.message}",
                             level="warn")

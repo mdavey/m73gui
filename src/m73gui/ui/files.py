@@ -10,7 +10,7 @@ import customtkinter as ctk
 from .. import phytime, protocol
 from ..constants import COL_WARN
 from ..services import transfers
-from ..state import TX_CANCELLED, TX_FAILED, TX_SENT
+from ..state import INCOMING_COMPLETE, TX_CANCELLED, TX_FAILED, TX_SENT
 
 FEC_CHOICES = {
     "L1 · +14% parity": 1,
@@ -102,6 +102,8 @@ class FilesTab(ctk.CTkFrame):
             tree.heading(key, text=label)
             tree.column(key, width=width)
         tree.pack(fill="both", expand=True, padx=12, pady=6)
+        tree.configure(cursor="hand2")
+        tree.bind("<Double-1>", self._open_incoming)
         self.tree = tree
 
         brow = ctk.CTkFrame(in_card, fg_color="transparent")
@@ -166,6 +168,9 @@ class FilesTab(ctk.CTkFrame):
             text += f"  ·  ~{phytime.human_duration(est)} airtime"
             if block < transfers.SMALL_BLOCK_WARN:
                 text += "  ·  header-heavy blocks on this mode"
+        bad = protocol.file_type_extension(os.path.basename(self.selected_path))
+        if bad:
+            text += f"  ·  unusual file type ({bad})"
         self.file_label.configure(text=text)
 
     def clear_selection(self) -> None:
@@ -227,6 +232,26 @@ class FilesTab(ctk.CTkFrame):
             self.tree.item(iid, values=values)
         else:
             self.tree.insert("", 0, iid=iid, values=values)
+
+    def _open_incoming(self, event) -> None:
+        """Double-click a finished transfer to open it with the desktop default."""
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        snap = self.app.state.incoming.get(int(iid[1:]))
+        if snap is None or snap.status != INCOMING_COMPLETE or not snap.path:
+            return
+        if not os.path.exists(snap.path):
+            self.app.notify(f"{snap.name} is no longer at {snap.path}",
+                            level="warn")
+            return
+        try:
+            subprocess.Popen(
+                ["xdg-open", snap.path], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            self.app.notify(f"cannot open {snap.name}: {exc}", level="error")
 
     def _open_folder(self) -> None:
         path = self.app.downloads_dir
