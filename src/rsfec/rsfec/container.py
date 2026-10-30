@@ -23,9 +23,8 @@ from . import _codec, geometry
 from .errors import CorruptedError, HeaderError
 from .header import (
     SHA1_LEN,
-    _FIXED1,
-    _FIXED2,
     build_header,
+    header_length,
     parse_header,
     sanitize_name,
 )
@@ -78,7 +77,7 @@ def _validate_args(block_size: int, fec: int) -> int:
 
 
 def _header_length(name: str) -> int:
-    return _FIXED1.size + len(name.encode("utf-8")) + _FIXED2.size + SHA1_LEN
+    return header_length(name)
 
 
 def pack(path, *, block_size: int, fec: int) -> PackResult:

@@ -21,7 +21,15 @@ from dataclasses import dataclass
 
 from .errors import HeaderError
 
-__all__ = ["MAGIC", "VERSION", "SHA1_LEN", "build_header", "parse_header", "sanitize_name"]
+__all__ = [
+    "MAGIC",
+    "VERSION",
+    "SHA1_LEN",
+    "build_header",
+    "parse_header",
+    "sanitize_name",
+    "header_length",
+]
 
 MAGIC = b"RSF1"
 VERSION = 1
@@ -29,6 +37,11 @@ SHA1_LEN = 20
 
 _FIXED1 = struct.Struct(">4sBBHIQH")  # magic..name_len, name follows
 _FIXED2 = struct.Struct(">Q")         # file_size, sha1 follows
+
+
+def header_length(name: str) -> int:
+    """Total header size in bytes for a given filename (fixed fields + name)."""
+    return _FIXED1.size + len(name.encode("utf-8")) + _FIXED2.size + SHA1_LEN
 
 
 def sanitize_name(name: str) -> str:

@@ -90,5 +90,20 @@ class Sanitize(unittest.TestCase):
         self.assertEqual(header.sanitize_name(""), "")
 
 
+class HeaderLength(unittest.TestCase):
+    def test_matches_build_header_output(self):
+        for name in ("", "a.txt", "n" * 64, "ünïcode.bin"):
+            built = header.build_header(
+                fec=2,
+                block_size=512,
+                data_blocks=3,
+                total_blocks=4,
+                name=name,
+                file_size=999,
+                sha1_digest=b"\xab" * 20,
+            )
+            self.assertEqual(header.header_length(name), len(built))
+
+
 if __name__ == "__main__":
     unittest.main()
