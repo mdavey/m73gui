@@ -48,6 +48,7 @@ class Field:
                 side="left"
             )
             self.widget = ctk.CTkEntry(row, width=110)
+            self.widget.pack(side="right")
             self._row = row
         else:
             raise ValueError(kind)
