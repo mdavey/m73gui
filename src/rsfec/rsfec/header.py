@@ -104,7 +104,7 @@ def parse_header(payload: bytes) -> Header:
         raise HeaderError("not an rsfec stream (bad magic)")
     if version != VERSION:
         raise HeaderError(f"unsupported rsfec version {version}")
-    if not 1 <= fec <= 4:
+    if not 0 <= fec <= 4:
         raise HeaderError(f"invalid fec level {fec} in header")
     tail_at = _FIXED1.size + name_len + _FIXED2.size
     if len(payload) < tail_at + SHA1_LEN:

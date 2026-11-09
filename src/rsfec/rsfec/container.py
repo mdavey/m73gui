@@ -71,8 +71,8 @@ class Unpacked:
 def _validate_args(block_size: int, fec: int) -> int:
     if not isinstance(block_size, int) or not 1 <= block_size <= 0xFFFF:
         raise ValueError("block_size must be an integer between 1 and 65535")
-    if fec not in (1, 2, 3, 4):
-        raise ValueError(f"invalid FEC level {fec!r} (expected 1..4)")
+    if fec not in (0, 1, 2, 3, 4):
+        raise ValueError(f"invalid FEC level {fec!r} (expected 0..4)")
     return int(fec)
 
 
@@ -114,11 +114,12 @@ def pack_bytes(data: bytes, *, name: str, block_size: int, fec: int) -> PackResu
         src_base = data_pos * block_size
         src_stop = (data_pos + g.data_blocks) * block_size
         stream[base:data_stop] = payload[src_base:src_stop]
-        for j in range(block_size):
-            column = payload[src_base + j:src_stop:block_size]
-            parity = _codec.encode_parity(column, g.parity_blocks)
-            for k, sym in enumerate(parity):
-                stream[(g.parity_range.start + k) * block_size + j] = sym
+        if g.parity_blocks:
+            for j in range(block_size):
+                column = payload[src_base + j:src_stop:block_size]
+                parity = _codec.encode_parity(column, g.parity_blocks)
+                for k, sym in enumerate(parity):
+                    stream[(g.parity_range.start + k) * block_size + j] = sym
         data_pos += g.data_blocks
     return PackResult(
         stream=bytes(stream),
@@ -232,6 +233,8 @@ def unpack(stream, *, block_size: int, fec: int, missing=None) -> Unpacked:
                 f"group at block {g.start_block}: {len(group_erasures)} "
                 f"blocks missing, at most {g.parity_blocks} recoverable"
             )
+        if not g.parity_blocks:
+            continue  # L0 group: nothing to repair, loss already rejected
         base = g.start_block * block_size
         span = group_end * block_size
         data_stop = (data_pos + g.data_blocks) * block_size

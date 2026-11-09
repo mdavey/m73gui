@@ -23,7 +23,7 @@ class LevelTable(unittest.TestCase):
             self.assertGreater(over, 255)
 
     def test_invalid_level(self):
-        for bad in (0, 5, -1):
+        for bad in (5, -1):
             with self.assertRaises(ValueError):
                 geo.parity_blocks(bad, 1)
             with self.assertRaises(ValueError):

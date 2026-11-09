@@ -65,6 +65,91 @@ class FrameSecondsTest(unittest.TestCase):
         )
 
 
+class WideOFDMTest(unittest.TestCase):
+    """Values mirror Common::setup_wide in modem73_wide (phy/common.hh):
+    order = base_order + bandwidth + frame_size (cap 16), 640<<bw-1 tones,
+    symbols solved by slot capacity, payload scaled by codeword blocks."""
+
+    def wide(self, mod, rate="1/2", frame=0, bw=1, blocks=1, **extra):
+        cfg = {
+            "modem_type": 0, "modulation": mod, "code_rate": rate,
+            "frame_size": frame, "bandwidth": bw, "blocks": blocks,
+        }
+        cfg.update(extra)
+        return cfg
+
+    def test_slot_capacity(self):
+        self.assertEqual(phytime._slot_capacity(1, 640, 1), 512)
+        self.assertEqual(phytime._slot_capacity(1, 640, 2), 1024)
+        # 8PSK shortens every 32nd bit-slot, so it lands under the raw max
+        raw = 512 * 3
+        self.assertLess(phytime._slot_capacity(1, 640, 3), raw)
+
+    def test_wide_payload_and_airtime(self):
+        cfg = self.wide("QPSK")  # 4k short: order 12 -> 256 B over 4 symbols
+        self.assertEqual(phytime.payload_bytes_for(cfg), 256)
+        self.assertAlmostEqual(phytime.frame_seconds(cfg), 7 * 49 / 300)
+        cfg = self.wide("QPSK", frame=1)  # normal doubles: order 13, 8 symbols
+        self.assertEqual(phytime.payload_bytes_for(cfg), 512)
+        self.assertAlmostEqual(phytime.frame_seconds(cfg), 11 * 49 / 300)
+
+    def test_blocks_scale_payload_and_time(self):
+        one = self.wide("8PSK", "3/4", bw=3)  # 16k short: order 16, 11 symbols
+        self.assertEqual(phytime.payload_bytes_for(one), 6144)
+        eight = self.wide("8PSK", "3/4", bw=3, blocks=8)
+        self.assertEqual(phytime.payload_bytes_for(eight), 49152)
+        # one preamble + 8 codeword groups: README_WIDE's ~15 s 16k frame
+        self.assertAlmostEqual(phytime.frame_seconds(eight), 91 * 49 / 300)
+        self.assertAlmostEqual(
+            49152 * 8 / phytime.frame_seconds(eight) / 1000, 26.5, delta=0.2
+        )
+
+    def test_order_capped_at_16(self):
+        # QAM1024 at 16k: base order 15 + 3 clamps down to 16
+        self.assertEqual(
+            phytime.payload_bytes_for(self.wide("QAM1024", "3/4", bw=3)), 6144
+        )
+
+    def test_postamble_wide(self):
+        cfg = self.wide("QPSK", postamble=True)
+        self.assertAlmostEqual(phytime.frame_seconds(cfg), 7 * 49 / 300 + 0.4)
+
+    def test_invalid_combos(self):
+        self.assertEqual(phytime.payload_bytes_for(self.wide("QPSK", "1/2x2")), 0)
+        self.assertEqual(phytime.payload_bytes_for(self.wide("QPSK", frame=2)), 0)
+        self.assertEqual(phytime.payload_bytes_for(self.wide("QPSK", frame=3)), 0)
+        # normal frames overflow the codeword cap once base order + bw >= 16
+        self.assertEqual(
+            phytime.payload_bytes_for(self.wide("8PSK", "3/4", frame=1, bw=3)), 0
+        )
+        self.assertEqual(
+            phytime.payload_bytes_for(self.wide("QAM1024", "3/4", frame=1, bw=3)), 0
+        )
+        self.assertEqual(phytime.payload_bytes_for(self.wide("QPSK", blocks=9)), 0)
+        self.assertEqual(phytime.payload_bytes_for(self.wide("QPSK", bw=4)), 0)
+        self.assertEqual(
+            phytime.frame_seconds(self.wide("8PSK", "1/2x2")),
+            phytime._DEFAULT_FRAME_S,
+        )
+
+    def test_base_family_ignores_wide_keys(self):
+        plain = {"modem_type": 0, "modulation": "QPSK", "code_rate": "1/2",
+                 "frame_size": 1}
+        self.assertEqual(
+            phytime.payload_bytes_for(dict(plain, bandwidth=0, blocks=8)), 512
+        )
+        self.assertAlmostEqual(
+            phytime.frame_seconds(dict(plain, bandwidth=0, blocks=8)),
+            19 * 41 / 300,
+        )
+
+    def test_estimate_uses_wide_time(self):
+        est = phytime.estimate_transfer_seconds(self.wide("QPSK"), 2)
+        self.assertAlmostEqual(
+            est, 2 * (7 * 49 / 300 + phytime.CHUNK_OVERHEAD_S)
+        )
+
+
 class PayloadBytesForTest(unittest.TestCase):
     # Values cross-checked against modem73 phy/common.hh Common::setup,
     # phy/mfsk_modem.hh MFSKParams, phy/robust_modem.hh RobustParams.

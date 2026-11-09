@@ -1,5 +1,7 @@
 .venv
 modem73
+modem73_wide
+off-air-recording/
 __pycache__/
 *.py[cod]
 .pytest_cache/

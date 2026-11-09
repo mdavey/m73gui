@@ -13,6 +13,7 @@ from ..services import transfers
 from ..state import INCOMING_COMPLETE, TX_CANCELLED, TX_FAILED, TX_SENT
 
 FEC_CHOICES = {
+    "L0 · no parity": 0,
     "L1 · +14% parity": 1,
     "L2 · +20% parity": 2,
     "L3 · +33% parity": 3,

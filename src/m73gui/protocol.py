@@ -209,8 +209,8 @@ FILE_BLOCK_BODY = struct.Struct("<BI")
 def encode_file_block(
     transfer_id: int, seq: int, fec: int, total: int, block: bytes
 ) -> bytes:
-    if fec not in (1, 2, 3, 4):
-        raise ProtocolError(f"invalid FEC level {fec!r} (expected 1..4)")
+    if fec not in (0, 1, 2, 3, 4):
+        raise ProtocolError(f"invalid FEC level {fec!r} (expected 0..4)")
     if not 1 <= total <= 0xFFFFFFFF:
         raise ProtocolError("total_packets out of range")
     if not block:
@@ -225,7 +225,7 @@ def decode_file_block(env: Envelope) -> tuple[int, int, bytes]:
     if len(env.body) <= FILE_BLOCK_BODY.size:
         raise ProtocolError("file_block too short")
     fec, total = FILE_BLOCK_BODY.unpack_from(env.body, 0)
-    if fec not in (1, 2, 3, 4):
+    if fec not in (0, 1, 2, 3, 4):
         raise ProtocolError(f"bad FEC level {fec} in file_block")
     if total < 1:
         raise ProtocolError("file_block total_packets == 0")

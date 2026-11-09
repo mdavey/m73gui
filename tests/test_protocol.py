@@ -140,11 +140,17 @@ class FileBlockTest(unittest.TestCase):
         self.assertEqual(block, data)
         self.assertEqual(len(frame), HEADER_LEN + 5 + len(data))
 
+    def test_roundtrip_fec_zero(self):
+        frame = p.encode_file_block(1, 0, 0, 1, b"raw")
+        env = p.decode_envelope(frame)
+        fec, total, block = p.decode_file_block(env)
+        self.assertEqual((fec, total, block), (0, 1, b"raw"))
+
     def test_encode_rejects_bad_args(self):
         with self.assertRaises(p.ProtocolError):
-            p.encode_file_block(1, 0, 0, 5, b"x")   # fec below range
-        with self.assertRaises(p.ProtocolError):
             p.encode_file_block(1, 0, 5, 5, b"x")   # fec above range
+        with self.assertRaises(p.ProtocolError):
+            p.encode_file_block(1, 0, -1, 5, b"x")  # fec below range
         with self.assertRaises(p.ProtocolError):
             p.encode_file_block(1, 0, 2, 0, b"x")   # total zero
         with self.assertRaises(p.ProtocolError):

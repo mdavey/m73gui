@@ -9,6 +9,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from ..constants import (
+    BLOCKS_MAX,
     CODE_RATES,
     FRAME_SIZE_NAMES,
     MFSK_MODE_NAMES,
@@ -24,6 +25,7 @@ MODE_FIELDS = (
     "modulation",
     "code_rate",
     "frame_size",
+    "blocks",
     "mfsk_mode",
     "robust_mode",
 )
@@ -31,8 +33,27 @@ MODE_FIELDS = (
 MODULATION_OPTIONS = [(m, m) for m in OFDM_MODULATIONS]
 CODE_RATE_OPTIONS = [(r, r) for r in CODE_RATES]
 FRAME_SIZE_OPTIONS = [(FRAME_SIZE_NAMES[i], str(i)) for i in (0, 1, 2)]
+# wide OFDM family has no long frames
+FRAME_SIZE_OPTIONS_WIDE = [(FRAME_SIZE_NAMES[i], str(i)) for i in (0, 1)]
+BLOCKS_OPTIONS = [(f"x{i}", str(i)) for i in range(1, BLOCKS_MAX + 1)]
 MFSK_OPTIONS = [(name, str(i)) for i, name in enumerate(MFSK_MODE_NAMES)]
 ROBUST_OPTIONS = [(name, str(i)) for i, name in enumerate(ROBUST_MODE_NAMES)]
+
+# which controls belong to which modem type (index into MODEM_TYPES)
+_BY_MODE = {
+    0: ("modulation", "code_rate", "frame_size"),
+    1: ("mfsk_mode",),
+    2: ("robust_mode",),
+}
+
+
+def visible_mode_names(modem_type: int, wide: bool = False) -> tuple:
+    """Control names shown for a modem type; the codewords menu appears for
+    OFDM only on the wide family (live state, never editable here)."""
+    names = list(_BY_MODE[modem_type])
+    if modem_type == 0 and wide:
+        names.append("blocks")
+    return tuple(names)
 
 
 def _norm(value) -> str:
@@ -60,6 +81,7 @@ class ModeRow(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.on_change = on_change
         self._loading = False
+        self._wide = False  # live modem runs a wide OFDM family
 
         if label:
             ctk.CTkLabel(self, text=label, font=FONTS["small"],
@@ -85,11 +107,7 @@ class ModeRow(ctk.CTkFrame):
             "frame_size": (menu(FRAME_SIZE_OPTIONS, 90), FRAME_SIZE_OPTIONS),
             "mfsk_mode": (menu(MFSK_OPTIONS, 110), MFSK_OPTIONS),
             "robust_mode": (menu(ROBUST_OPTIONS, 120), ROBUST_OPTIONS),
-        }
-        self._by_mode = {
-            0: ("modulation", "code_rate", "frame_size"),
-            1: ("mfsk_mode",),
-            2: ("robust_mode",),
+            "blocks": (menu(BLOCKS_OPTIONS, 60), BLOCKS_OPTIONS),
         }
         # persistent slot for the owning tab's extra controls; menus are
         # re-packed before it so it always stays rightmost. A childless
@@ -101,6 +119,29 @@ class ModeRow(ctk.CTkFrame):
 
     # -- state ---------------------------------------------------------------
 
+    def set_live_bandwidth(self, bandwidth) -> None:
+        """Tell the row which OFDM family the modem is running (report-only:
+        switching families needs a modem restart). Wide families show the
+        codewords menu and drop the long frame size. Silent: never fires
+        on_change."""
+        try:
+            wide = int(bandwidth or 0) > 0
+        except (TypeError, ValueError):
+            wide = False
+        if wide == self._wide:
+            return
+        self._wide = wide
+        box = self.controls["frame_size"][0]
+        spec = FRAME_SIZE_OPTIONS_WIDE if wide else FRAME_SIZE_OPTIONS
+        box.configure(values=[d for d, _ in spec])
+        if wide and box.get() == FRAME_SIZE_NAMES[2]:
+            box.set(FRAME_SIZE_NAMES[1])
+        self._apply_visibility()
+
+    def _visible_names(self) -> tuple:
+        """Control names shown for the current modem type and family."""
+        return visible_mode_names(self.modem_type(), self._wide)
+
     def modem_type(self) -> int:
         try:
             return MODEM_TYPES.index(self.seg.get())
@@ -111,7 +152,7 @@ class ModeRow(ctk.CTkFrame):
         """Current selection in get_config representation."""
         mtype = self.modem_type()
         out: dict = {"modem_type": mtype}
-        for name in self._by_mode[mtype]:
+        for name in self._visible_names():
             box, spec = self.controls[name]
             for display, value in spec:
                 if display == box.get():
@@ -155,11 +196,10 @@ class ModeRow(ctk.CTkFrame):
             self.on_change()
 
     def _apply_visibility(self) -> None:
-        want = self.modem_type()
-        for mtype, names in self._by_mode.items():
-            for name in names:
-                box = self.controls[name][0]
-                if mtype == want:
-                    box.pack(side="left", padx=(4, 0), before=self.trailing)
-                else:
-                    box.pack_forget()
+        visible = set(self._visible_names())
+        for name in self.controls:
+            box = self.controls[name][0]
+            if name in visible:
+                box.pack(side="left", padx=(4, 0), before=self.trailing)
+            else:
+                box.pack_forget()

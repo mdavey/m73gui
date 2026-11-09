@@ -23,6 +23,12 @@ class Header(ctk.CTkFrame):
         )
         self.callsign = StatusChip(left, "?", COL_IDLE)
         self.callsign.pack(side="left", padx=(8, 0))
+        # OFDM family (bandwidth) the modem runs; switching needs a restart,
+        # so it is shown, not set, here
+        self.bandwidth = ctk.CTkLabel(
+            left, text="", font=FONTS["mono_small"], text_color=FG_DIM
+        )
+        self.bandwidth.pack(side="left", padx=(8, 0))
 
         conn = ctk.CTkFrame(self, fg_color="transparent")
         conn.grid(row=0, column=1, sticky="w", padx=12)
@@ -66,6 +72,12 @@ class Header(ctk.CTkFrame):
 
     def update(self, state) -> None:
         self.callsign.set(state.callsign, COL_IDLE if state.control_connected else COL_OFF)
+
+        fam = state.bandwidth_label()
+        self.bandwidth.configure(
+            text=f"OFDM {fam}" if fam else "",
+            text_color=FG_DIM if fam in ("", "base") else "#7fd0ff",
+        )
 
         self.ctrl_chip.set(
             "Control ●" if state.control_connected else "Control ○",

@@ -156,6 +156,28 @@ class ClientTest(unittest.TestCase):
         self.assertIn("nope", str(cm.exception))
         server.close()
 
+    def test_set_config_partial_apply_surfaces_rejected(self):
+        server = FakeServer(handler=lambda req: {
+            "ok": True, "rejected": ["blocks (1-8, wide family)"],
+        })
+        client = self.make_client(server)
+        resp = client.set_config({"blocks": 9})
+        self.assertEqual(resp["rejected"], ["blocks (1-8, wide family)"])
+        server.close()
+
+    def test_set_config_all_rejected_names_fields(self):
+        server = FakeServer(handler=lambda req: {
+            "ok": False,
+            "rejected": ["blocks (1-8, wide family)",
+                         "bandwidth (OFDM family change requires restart)"],
+        })
+        client = self.make_client(server)
+        with self.assertRaises(ControlError) as cm:
+            client.set_config({"blocks": 9, "bandwidth": 2})
+        self.assertIn("bandwidth (OFDM family change requires restart)",
+                      str(cm.exception))
+        server.close()
+
     def test_timeout_drops_connection(self):
         server = FakeServer(respond=False)
         client = self.make_client(server, timeout=0.5)

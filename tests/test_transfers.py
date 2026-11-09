@@ -10,10 +10,12 @@ import unittest
 import rsfec
 
 from m73gui import protocol
+from m73gui import phytime
 from m73gui.constants import (
     FILE_MAX_BLOCKS,
     FILE_MAX_BYTES,
     KIND_FILE_BLOCK,
+    PACING_POLL_S,
 )
 from m73gui.services.transfers import FileSender, IncomingFiles
 from m73gui.state import (
@@ -93,6 +95,19 @@ def fast_sleep(abort: threading.Event):
     return sleep
 
 
+def recording_sleep(abort: threading.Event):
+    """fast_sleep that also records every requested sleep duration."""
+    base = fast_sleep(abort)
+    requested: list[float] = []
+
+    def sleep(seconds: float) -> bool:
+        requested.append(seconds)
+        return base(seconds)
+
+    sleep.requested = requested
+    return sleep
+
+
 def wait_until(predicate, timeout=5.0):
     end = time.monotonic() + timeout
     while time.monotonic() < end:
@@ -122,17 +137,19 @@ class SenderTest(unittest.TestCase):
             fh.write((seed * (size + 1))[:size])
         return path
 
-    def make_sender(self, station: FakeStation):
+    def make_sender(self, station: FakeStation, sleep_factory=fast_sleep):
         abort = threading.Event()
+        sleep_fn = sleep_factory(abort)
         sender = FileSender(
             emit=self.emit,
             send_frame=station.send_frame,
             get_status=station.get_status,
             get_config=station.get_config,
             outgoing_ids=self.outgoing_ids,
-            sleep=fast_sleep(abort),
+            sleep=sleep_fn,
         )
         sender._test_abort = abort
+        sender._test_sleep = sleep_fn
         return sender
 
     def run_sender(self, sender, path, fec=2):
@@ -200,6 +217,56 @@ class SenderTest(unittest.TestCase):
             stream = b"".join(blocks[i] for i in range(total))
             unpacked = rsfec.unpack(stream, block_size=BLOCK, fec=fec)
             self.assertEqual(len(unpacked.data), 3000)
+
+    def test_fec_zero_sends_no_parity(self):
+        path = self.make_file(3000, seed=b"z")
+        station = FakeStation()
+        sender = self.make_sender(station)
+        self.run_sender(sender, path, fec=0)
+        self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
+        _tid, fec_out, total, blocks = self.collect_blocks(station)
+        self.assertEqual(fec_out, 0)
+        with open(path, "rb") as fh:
+            packed = rsfec.pack_bytes(fh.read(), name="payload.bin",
+                                      block_size=BLOCK, fec=0)
+        self.assertEqual(packed.parity_blocks, 0)
+        self.assertEqual(total, packed.total_blocks)
+        stream = b"".join(blocks[i] for i in range(total))
+        unpacked = rsfec.unpack(stream, block_size=BLOCK, fec=0)
+        self.assertEqual(len(unpacked.data), 3000)
+
+    def test_pacing_uses_queue_depth_not_payload_size(self):
+        # wide x8-style mode: huge payload bytes must not scale the wait
+        # (the old payload_size/400 blind sleep stalled minutes per block)
+        cfg = dict(BASE_CONFIG, payload_size=34080, bandwidth=2, blocks=5)
+        station = FakeStation(config=cfg)
+        path = self.make_file(3000)
+        sender = self.make_sender(station, sleep_factory=recording_sleep)
+        self.run_sender(sender, path, fec=2)
+        self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
+        total = sender.snapshot.total_blocks
+        requested = sender._test_sleep.requested
+        self.assertGreater(total, 1)
+        per_gap = sum(requested) / total
+        self.assertLess(per_gap, 1.0,
+                        f"pacing waited {per_gap:.1f}s per block with a "
+                        f"responsive tx_queue")
+
+    def test_pacing_fallback_bounded_by_frame_airtime(self):
+        # status without tx_queue (older firmware): fallback must be clamped
+        # to the frame airtime, not payload bytes (34080/400 = 85 s before)
+        cfg = dict(BASE_CONFIG, payload_size=34080, bandwidth=2, blocks=5)
+        station = FakeStation(config=cfg,
+                              status={"channel_state": "idle"})
+        path = self.make_file(3000)
+        sender = self.make_sender(station, sleep_factory=recording_sleep)
+        self.run_sender(sender, path, fec=2)
+        self.assertEqual(sender.snapshot.status, TX_SENT, sender.snapshot.message)
+        total = sender.snapshot.total_blocks
+        per_gap = sum(sender._test_sleep.requested) / total
+        expected = max(0.3, min(30.0, phytime.frame_seconds(cfg)))
+        self.assertLess(per_gap, expected + PACING_POLL_S + 0.16)
+        self.assertGreater(per_gap, 0.3)
 
     def test_rejects_empty_file(self):
         station = FakeStation()
@@ -338,6 +405,20 @@ class ReceiverTest(unittest.TestCase):
         with open(stream.path, "rb") as fh:
             self.assertEqual(fh.read(), data)
         self.assertEqual(os.path.dirname(stream.path), os.path.join(self.tmp, "dl"))
+
+    def test_complete_transfer_fec_zero(self):
+        data = os.urandom(1500)
+        tid, packed = self.broadcast(data, fec=0)
+        self.assertEqual(packed.parity_blocks, 0)
+        self.wait_status("VK9RX", tid, INCOMING_COMPLETE)
+        stream = self.get("VK9RX", tid)
+        with open(stream.path, "rb") as fh:
+            self.assertEqual(fh.read(), data)
+
+    def test_fec_zero_loss_fails_immediately(self):
+        data = os.urandom(1500)
+        tid, _ = self.broadcast(data, fec=0, drop={1})
+        self.wait_status("VK9RX", tid, INCOMING_FAILED)
 
     def test_dropped_blocks_repaired_after_idle(self):
         # data+header spans 5 data blocks -> L2 gives 1 parity per group
@@ -530,6 +611,16 @@ class ReceiverTest(unittest.TestCase):
         self.files.handle_block(
             env, 2, 7, b"x" * BLOCK, sender="VK9RX"
         )
+        self.assertEqual(len(self.files.streams), 0)
+
+    def test_buffer_byte_cap_rejected(self):
+        # wide-era guard: valid geometry but 1000 x 32 KiB > 16 MiB cap
+        tid = protocol.new_transfer_id()
+        big = b"x" * 32768
+        env = protocol.decode_envelope(
+            protocol.encode_file_block(tid, 0, 2, 1000, big)
+        )
+        self.files.handle_block(env, 2, 1000, big, sender="VK9RX")
         self.assertEqual(len(self.files.streams), 0)
 
     def test_absurd_total_rejected(self):

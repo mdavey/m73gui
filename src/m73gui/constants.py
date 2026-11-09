@@ -34,9 +34,13 @@ FILE_NAME_MAX_BYTES = 64
 CHAT_FROM_MAX_LEN = 16
 FILE_MAX_BYTES = 1024 * 1024  # whole file is RS-packed in memory: 1 MiB hard cap
 FILE_MAX_BLOCKS = 65_535  # per-stream sanity cap (data + parity blocks)
+# receiver buffer cap: with 49 kB wide blocks, total*block_size from a bogus
+# packet could otherwise demand gigabytes
+MAX_STREAM_BYTES = 16 * 1024 * 1024
 
-# TX drain wait (file end, queue settling)
-TX_DRAIN_TIMEOUT_S = 60.0
+# TX drain wait (file end, queue settling): wide multi-codeword frames run up
+# to ~15 s each, and a couple may still be queued when the last one is sent
+TX_DRAIN_TIMEOUT_S = 180.0
 
 # Receiver behavior
 INCOMING_IDLE_TIMEOUT_S = 10.0
@@ -76,9 +80,13 @@ MODEM_TYPE_NAMES = {0: "OFDM", 1: "MFSK", 2: "ROBUST"}
 OFDM_MODULATIONS = [
     "BPSK", "QPSK", "8PSK", "QAM16", "QAM64", "QAM256", "QAM1024", "QAM4096",
 ]
-CODE_RATES = ["1/2", "2/3", "3/4", "5/6", "1/4", "1/2x2", "1/4x2"]
+CODE_RATES = ["1/2", "2/3", "3/4", "5/6", "1/4"]
 FRAME_SIZE_NAMES = {0: "short", 1: "normal", 2: "long"}
 FRAME_SIZE_INDEX = {"short": 0, "normal": 1, "long": 2, "micro": 3}
+
+# OFDM families (beta modem73_wide): switching needs a modem restart
+BANDWIDTH_NAMES = {0: "base", 1: "4k", 2: "8k", 3: "16k"}
+BLOCKS_MAX = 8  # codewords per preamble, wide family only
 
 MODEM_TYPES = ["OFDM", "MFSK", "ROBUST"]
 

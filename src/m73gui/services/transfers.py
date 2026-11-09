@@ -26,11 +26,12 @@ from bisect import bisect_right
 from rsfec.geometry import decode_groups, total_blocks_for
 from rsfec.header import header_length, parse_header
 
-from .. import protocol
+from .. import phytime, protocol
 from ..constants import (
     FILE_MAX_BLOCKS,
     FILE_MAX_BYTES,
     INCOMING_IDLE_TIMEOUT_S,
+    MAX_STREAM_BYTES,
     PACING_HIGH_WATER,
     PACING_LOW_WATER,
     PACING_POLL_S,
@@ -103,7 +104,7 @@ class FileSender:
         """Begin transfer; returns an error string or None."""
         if self.busy():
             return "a transfer is already running"
-        if fec not in (1, 2, 3, 4):
+        if fec not in (0, 1, 2, 3, 4):
             return f"invalid FEC level {fec!r}"
         try:
             size = os.path.getsize(path)
@@ -248,7 +249,12 @@ class FileSender:
             status=TX_SENDING,
             message=(
                 f"Broadcasting {total} blocks of {block_size} B "
-                f"(FEC L{snap.fec}, +{packed.parity_blocks} parity)"
+                f"(FEC L{snap.fec}"
+                + (
+                    f", +{packed.parity_blocks} parity)"
+                    if packed.parity_blocks
+                    else ", no parity)"
+                )
             ),
         )
         if block_size < SMALL_BLOCK_WARN:
@@ -288,7 +294,11 @@ class FileSender:
 
         # paced block loop
         depth: int | None = None
-        fallback_delay = max(0.3, payload_size / 400.0)
+        # fallback_delay is the blind wait used only when the control link
+        # gives no tx_queue depth: scale it with this mode's airtime, not its
+        # payload bytes (wide multi-codeword frames carry up to 8x per frame,
+        # so payload-proportional waiting stalls transfers for minutes)
+        fallback_delay = max(0.3, min(30.0, phytime.frame_seconds(cfg)))
         for index in range(total):
             if self._stopped():
                 self._finish(TX_CANCELLED, "cancelled")
@@ -317,9 +327,14 @@ class FileSender:
                 self._publish()
             depth = None if depth is None else depth + 1
             if depth is None:
-                if self._wait(fallback_delay):
+                # ask the modem for the queue depth instead of sleeping blind;
+                # only fall back to airtime-proportional waiting when the
+                # control link is not answering
+                if self._wait(PACING_POLL_S):
                     continue  # loop re-checks cancelled/aborted
                 depth = self._queue_depth()
+                if depth is None and self._wait(fallback_delay):
+                    continue
 
         if self._stopped():
             self._finish(TX_CANCELLED, "cancelled")
@@ -451,6 +466,13 @@ class IncomingFiles:
         if stream is None:
             if not 1 <= total <= FILE_MAX_BLOCKS:
                 log.info("rejecting stream %s: total_packets %s", tid, total)
+                return
+            if total * len(block) > MAX_STREAM_BYTES:
+                log.info(
+                    "rejecting stream %s: %s blocks x %s B exceeds the %s B "
+                    "receive buffer cap", tid, total, len(block),
+                    MAX_STREAM_BYTES,
+                )
                 return
             try:
                 stream = _Stream(tid, sender, fec, total, len(block))

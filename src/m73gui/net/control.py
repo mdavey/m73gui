@@ -239,7 +239,18 @@ class ControlClient:
         return self._request_ok("get_status")
 
     def set_config(self, fields: dict) -> dict:
-        return self._request_ok("set_config", **fields)
+        """Apply config fields. Raises ControlError when nothing was applied.
+
+        The beta control port may partially apply a request: check the
+        returned response's ``rejected`` list for ``field (reason)`` entries.
+        """
+        resp = self.request("set_config", **fields)
+        if not resp.get("ok", False):
+            rejected = ", ".join(resp.get("rejected") or [])
+            raise ControlError(
+                resp.get("error") or rejected or "set_config failed"
+            )
+        return resp
 
     def rx_frame_history(self, limit: int = 100, since_seq: int = 0) -> list[dict]:
         resp = self._request_ok("rx_frame_history", limit=limit, since_seq=since_seq)

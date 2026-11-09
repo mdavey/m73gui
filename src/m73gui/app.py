@@ -174,16 +174,23 @@ class App:
             current = self.state.config or self.control.get_config()
             changed = changed_mode_fields(fields, current)
             if changed:
-                self.control.set_config(changed)
-                return self.control.get_config()
-            return current
+                resp = self.control.set_config(changed)
+                return self.control.get_config(), resp.get("rejected") or []
+            return current, []
 
-        def done(cfg, error):
+        def done(result, error):
+            cfg, rejected = result or (None, [])
             if error:
                 self.notify(f"mode change failed: {error}", level="error")
                 return
             if cfg and cfg is not self.state.config:
                 self._on_config(cfg)
+            if rejected:
+                # partial application: do not broadcast on a half-set mode
+                self.notify(
+                    "mode change rejected: " + "; ".join(rejected), level="error"
+                )
+                return
             then(cfg or self.state.config)
 
         self.run_async(work, done)
@@ -252,21 +259,26 @@ class App:
                         level="warn")
             return
 
-        def work() -> str:
+        def work() -> tuple[str, bool]:
             try:
-                self.control.set_config(fields)
+                resp = self.control.set_config(fields)
             except ControlError as exc:
                 raise exc
-            return f"applied {len(fields)} field(s)"
+            rejected = resp.get("rejected") or []
+            msg = f"applied {len(fields)} field(s)"
+            if rejected:
+                msg += " — rejected: " + "; ".join(rejected)
+            return msg, bool(rejected)
 
         self.run_async(work, self._on_settings_applied)
 
     def _on_settings_applied(self, value, error) -> None:
         if error:
             self.settings_tab.on_apply_result(False, f"apply failed: {error}")
-        else:
-            self.settings_tab.on_apply_result(True, str(value))
-            self.files_tab.on_live_config()
+            return
+        msg, warned = value
+        self.settings_tab.on_apply_result(True, msg, warn=warned)
+        self.files_tab.on_live_config()
 
     def refresh_settings(self) -> None:
         def work():
@@ -452,6 +464,11 @@ class App:
         self.header.update(self.state)
         self.settings_tab.load(cfg)
         self.channel_tab.update(self.state)
+        # the OFDM family is live modem state (restart to change): it gates
+        # the codewords menu and the wide estimate paths
+        bw = cfg.get("bandwidth") or 0
+        self.chat_tab.mode_row.set_live_bandwidth(bw)
+        self.files_tab.mode_row.set_live_bandwidth(bw)
         if not self._mode_adopted and cfg:
             self._adopt_mode_defaults(cfg)
         self.files_tab.on_live_config()

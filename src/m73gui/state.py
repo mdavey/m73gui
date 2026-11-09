@@ -6,6 +6,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from .constants import BANDWIDTH_NAMES
+
+# get_config reports frame_size numerically; the packet log wants the TUI's letter
+_FRAME_LETTERS = {0: "S", 1: "N", 2: "L", 3: "M"}
+
 TX = "TX"
 RX = "RX"
 
@@ -107,12 +112,48 @@ class AppState:
         mtype = cfg.get("modem_type")
         if mtype == 0:
             frame = cfg.get("frame_size", "normal")
-            return f"{cfg.get('modulation', '?')} {cfg.get('code_rate', '')} {str(frame)[0].upper()}"
+            try:
+                letter = _FRAME_LETTERS.get(int(frame), str(frame)[0].upper())
+            except (TypeError, ValueError):
+                letter = str(frame)[0].upper()
+            label = (
+                f"{cfg.get('modulation', '?')} {cfg.get('code_rate', '')} "
+                f"{letter}"
+            )
+            try:
+                bw = int(cfg.get("bandwidth") or 0)
+            except (TypeError, ValueError):
+                bw = 0
+            if bw > 0:
+                label += f" {BANDWIDTH_NAMES.get(bw, f'{bw}k')}"
+                try:
+                    if int(cfg.get("blocks") or 1) > 1:
+                        label += f" x{int(cfg['blocks'])}"
+                except (TypeError, ValueError):
+                    pass
+            return label
         if mtype == 1:
             return str(cfg.get("modulation") or cfg.get("mfsk_mode", "?"))
         if mtype == 2:
             return str(cfg.get("modulation", f"RDM-{cfg.get('robust_mode', '?')}"))
         return "—"
+
+    def bandwidth_label(self) -> str:
+        """Running OFDM family name ("base"/"4k"/"8k"/"16k"); empty until the
+        config loads or when the station runs MFSK/ROBUST."""
+        cfg = self.config
+        if not cfg:
+            return ""
+        try:
+            if int(cfg.get("modem_type", -1)) != 0:
+                return ""
+        except (TypeError, ValueError):
+            return ""
+        try:
+            bw = int(cfg.get("bandwidth") or 0)
+        except (TypeError, ValueError):
+            bw = 0
+        return BANDWIDTH_NAMES.get(bw, f"{bw}k")
 
     def channel_state(self) -> str:
         return str(self.status.get("channel_state", "unknown"))

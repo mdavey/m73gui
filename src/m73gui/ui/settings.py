@@ -8,6 +8,7 @@ import re
 import customtkinter as ctk
 
 from ..constants import (
+    BANDWIDTH_NAMES,
     COL_WARN,
     FRAME_SIZE_NAMES,
     MFSK_MODE_NAMES,
@@ -22,13 +23,17 @@ BAND_OPTIONS = [("HF", "0"), ("VHF/UHF", "1")]
 
 MODES_GUIDE = """OFDM — fastest family (~0.8-13 kbit/s in the same 2400 Hz). For clean channels: VHF/UHF FM, line-of-sight. Practical picks: QPSK or 8PSK at rate 3/4 or 5/6, normal or long frames. QAM256+ needs a near-perfect channel and rarely works.
 
+Wide OFDM (4k / 8k / 16k, beta modem73) — the same modem on a bigger canvas: ~26 kbit/s at 16k with 8PSK 3/4 and 8 codewords behind one preamble (the x1–x8 menu on the mode row, applies live). The running family is fixed for the modem process; change it on modem73 itself (CLI --bandwidth / TUI) and restart there. Wide has no long frames, microbursts or x2 code rates.
+
 ROBUST (RDM) — slowest, toughest; built for fading HF paths (40/80 m NVIS). From ~1150 bps (RDM-1200) down to ~150 bps (RDMN-150). "N" = narrow 600 Hz variant, "S" = short frames (170 B payload vs 510 B).
 
 MFSK — non-coherent weak-signal / backup mode; fixed ~4.4 s frames, tolerant of poor sync. MFSK-16 is the common all-rounder.
 
 Code rate: the first number is the share of what's transmitted that carries data. 5/6 means ~83% data, the remaining 1/6 is FEC; 1/2 means half the airtime is error correction (reliable, half speed).
 
-File FEC (Files tab, L1-L4) is extra Reed-Solomon parity on top of the code rate; e.g. L2 adds ~20% airtime and repairs roughly 1 lost packet in 6."""
+Low-latency streaming (TX settings): TX delay 0 keys the radio with no lead silence; "Keep PTT" (needs CSMA off) holds the key down while the queue has frames so packets run back-to-back with only the burst gap of silence between them.
+
+File FEC (Files tab) is extra Reed-Solomon parity on top of the code rate; e.g. L2 adds ~20% airtime and repairs roughly 1 lost packet in 6. L0 sends raw blocks with no parity: smallest and fastest, but one lost frame loses the file (the checksum still detects it). Note every frame has a fixed airtime for its mode: on a wide xN setting even a tiny file fills a full-size frame — use x1 for small payloads."""
 
 
 class Field:
@@ -56,9 +61,23 @@ class Field:
             raise ValueError(kind)
         if kind != "entry":
             self._row = None
+        self.visible = True
+        self._pack_kw: dict | None = None
 
     def pack(self, **kw) -> None:
+        self._pack_kw = kw
         (self._row or self.widget).pack(**kw)
+
+    def set_visible(self, visible: bool) -> None:
+        """Hide rows for fields the running modem does not report."""
+        if visible == self.visible:
+            return
+        self.visible = visible
+        if visible:
+            if self._pack_kw is not None:
+                (self._row or self.widget).pack(**self._pack_kw)
+        else:
+            (self._row or self.widget).pack_forget()
 
     def get_config_value(self):
         """Current widget value in get_config representation, or raises."""
@@ -137,6 +156,9 @@ GROUP_SPEC = [
         "TX",
         [
             ("tx_drive", "TX drive %", "entry", ("int", 5, 100)),
+            ("tx_delay_ms", "TX delay ms", "entry", ("int", 0, 2500)),
+            ("burst_gap_ms", "Burst gap ms", "entry", ("int", 20, 2000)),
+            ("tx_keep_ptt", "Keep PTT while queued", "switch", None),
             ("postamble", "Postamble (OFDM)", "switch", None),
             ("tx_blanking_enabled", "TX blanking", "switch", None),
             ("fragmentation_enabled", "Fragmentation", "switch", None),
@@ -159,13 +181,15 @@ READONLY_FIELDS = [
     ("center_freq", "Center freq Hz"),
     ("payload_size", "Payload size B"),
     ("short_frame", "Short frame (derived)"),
+    ("ptt_delay_ms", "PTT assert delay ms"),
+    ("ptt_tail_ms", "PTT hold tail ms"),
 ]
 
 NUMERIC_OPTION_FIELDS = {"csma_band"}
 
 # which modem read-only rows belong to which modem type
 _MODEM_VIEW_ROWS = {
-    0: ("modulation", "code_rate", "frame_size"),
+    0: ("modulation", "code_rate", "frame_size", "bandwidth", "blocks"),
     1: ("mfsk_mode",),
     2: ("robust_mode",),
 }
@@ -218,6 +242,16 @@ class SettingsTab(ctk.CTkFrame):
                     anchor="w",
                 )
                 self.blank_hint.pack(fill="x", padx=12)
+                self.keep_hint = ctk.CTkLabel(
+                    card,
+                    text="Keep PTT only applies with CSMA off (not VOX): queued "
+                    "frames go back-to-back, burst-gap apart",
+                    font=FONTS["small"],
+                    text_color=FG_DIM,
+                    anchor="w",
+                )
+                self.keep_hint.pack(fill="x", padx=12)
+                self._keep_hint_on = True
 
         # ---- read-only ----
         ro_card = Card(scroll, "Read-only info")
@@ -271,9 +305,17 @@ class SettingsTab(ctk.CTkFrame):
         try:
             self.snapshot = dict(config)
             for name, field in self.fields.items():
+                field.set_visible(name in config)
                 if name in config:
                     field.set_config_value(config[name])
             self._update_modem_view(config)
+            keep_on = "tx_keep_ptt" in config
+            if keep_on != self._keep_hint_on:
+                self._keep_hint_on = keep_on
+                if keep_on:
+                    self.keep_hint.pack(fill="x", padx=12)
+                else:
+                    self.keep_hint.pack_forget()
             for name, label in self.readonly_labels.items():
                 value = config.get(name, "—")
                 label.configure(text=str(value))
@@ -298,6 +340,8 @@ class SettingsTab(ctk.CTkFrame):
         fields: dict = {}
         errors: list[str] = []
         for name, field in self.fields.items():
+            if name not in self.snapshot:
+                continue  # field unknown to the running modem73
             if name == "tx_drive":
                 text = field.widget.get().strip()
                 try:
@@ -349,8 +393,8 @@ class SettingsTab(ctk.CTkFrame):
             return
         self.app.apply_settings(changed)
 
-    def on_apply_result(self, ok: bool, message: str) -> None:
-        color = "#3fb950" if ok else COL_WARN
+    def on_apply_result(self, ok: bool, message: str, warn: bool = False) -> None:
+        color = "#3fb950" if ok and not warn else COL_WARN
         self.status_label.configure(text=message, text_color=color)
         if ok:
             self.app.refresh_settings()
@@ -389,6 +433,8 @@ class SettingsTab(ctk.CTkFrame):
             ("modulation", "Modulation"),
             ("code_rate", "Code rate"),
             ("frame_size", "Frame size"),
+            ("bandwidth", "OFDM family"),
+            ("blocks", "Codewords"),
             ("mfsk_mode", "MFSK mode"),
             ("robust_mode", "ROBUST mode"),
         ):
@@ -417,10 +463,16 @@ class SettingsTab(ctk.CTkFrame):
             except (KeyError, IndexError, TypeError, ValueError):
                 return "—"
 
+        try:
+            blocks_text = f"x{int(config['blocks'])}"
+        except (KeyError, TypeError, ValueError):
+            blocks_text = "—"
         texts = {
             "modulation": str(config.get("modulation") or "—"),
             "code_rate": str(config.get("code_rate") or "—"),
             "frame_size": named(FRAME_SIZE_NAMES, "frame_size"),
+            "bandwidth": named(BANDWIDTH_NAMES, "bandwidth"),
+            "blocks": blocks_text,
             "mfsk_mode": named(MFSK_MODE_NAMES, "mfsk_mode"),
             "robust_mode": named(ROBUST_MODE_NAMES, "robust_mode"),
         }
@@ -430,7 +482,7 @@ class SettingsTab(ctk.CTkFrame):
             show = ()
         for name, (row, value) in self.modem_rows.items():
             value.configure(text=texts[name])
-            if name in show:
+            if name in show and config.get(name) is not None:
                 row.pack(fill="x", padx=12, pady=1)
             else:
                 row.pack_forget()

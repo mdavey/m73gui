@@ -53,6 +53,13 @@ class LosslessRoundtrip(unittest.TestCase):
         self._roundtrip(77, 128, 2)
         self._roundtrip(205, 128, 2)
 
+    def test_level_zero_no_parity(self):
+        for size in (0, 1, 300):
+            with self.subTest(size=size):
+                res = self._roundtrip(size, 128, 0)
+                self.assertEqual(res.parity_blocks, 0)
+                self.assertEqual(res.total_blocks, res.data_blocks)
+
     def test_multi_group(self):
         self._roundtrip(8500, 64, 4)   # 134 data blocks -> groups of 127 + 7
         self._roundtrip(15000, 64, 1)  # 235 data blocks -> 223 + 12
@@ -163,6 +170,20 @@ class Recovery(unittest.TestCase):
         stream = corrupt_block(drop(res.stream, 128, [4]), 128, 2)
         out = rsfec.unpack(stream, block_size=128, fec=3)
         self.assertEqual(out.data, content)
+
+    def test_level_zero_loss_detected_not_repaired(self):
+        res = rsfec.pack_bytes(make_content(500), name="t.bin",
+                               block_size=128, fec=0)
+        stream = drop(res.stream, 128, {2})
+        with self.assertRaises(rsfec.CorruptedError):
+            rsfec.unpack(stream, block_size=128, fec=0, missing={2})
+
+    def test_level_zero_corruption_detected(self):
+        res = rsfec.pack_bytes(make_content(500), name="t.bin",
+                               block_size=128, fec=0)
+        stream = corrupt_block(res.stream, 128, 1)
+        with self.assertRaises(rsfec.CorruptedError):
+            rsfec.unpack(stream, block_size=128, fec=0)
 
     def test_genuine_zero_block_plus_missing(self):
         # name "t.bin" -> header 51; data offset 205 makes stream block 2

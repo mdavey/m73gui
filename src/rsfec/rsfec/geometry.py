@@ -28,6 +28,7 @@ __all__ = [
 class FecLevel(IntEnum):
     """FEC strength; approximate fraction of transmitted blocks that are data."""
 
+    L0 = 0  # raw blocks, no parity (the container SHA-1 still verifies)
     L1 = 1  # ~7/8
     L2 = 2  # ~5/6
     L3 = 3  # ~3/4
@@ -36,7 +37,9 @@ class FecLevel(IntEnum):
 
 # level -> (max data blocks per group, parity divisor r with p = ceil(d / r)).
 # d_max is the largest d with d + ceil(d / r) <= 255 (GF(256) codeword limit).
+# L0 carries no parity at all: one block lost means the file is lost.
 _LEVELS: dict[int, tuple[int, int]] = {
+    0: (255, 0),
     1: (223, 7),
     2: (212, 5),
     3: (191, 3),
@@ -46,7 +49,7 @@ _LEVELS: dict[int, tuple[int, int]] = {
 
 def _params(level: int) -> tuple[int, int]:
     if level not in _LEVELS:
-        raise ValueError(f"invalid FEC level {level!r} (expected 1..4)")
+        raise ValueError(f"invalid FEC level {level!r} (expected 0..4)")
     return _LEVELS[int(level)]
 
 
@@ -62,6 +65,8 @@ def parity_blocks(level: int, data_blocks: int) -> int:
         raise ValueError(
             f"data_blocks must be 1..{dmax} for FEC level {level}, got {data_blocks}"
         )
+    if r == 0:
+        return 0
     return (data_blocks + r - 1) // r
 
 
