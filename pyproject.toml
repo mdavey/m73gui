@@ -6,7 +6,11 @@ license = "MIT"
 requires-python = ">=3.14"
 dependencies = [
     "customtkinter>=6.0.0",
+    "opuslib-next>=1.3.1",
     "rsfec",
+    "opuslink",
+    "sounddevice>=0.5",
+    "numpy>=2.5.4",
 ]
 
 [project.scripts]
@@ -20,7 +24,8 @@ build-backend = "hatchling.build"
 packages = ["src/m73gui"]
 
 [tool.uv.workspace]
-members = ["src/rsfec"]
+members = ["src/rsfec", "src/opuslink"]
 
 [tool.uv.sources]
 rsfec = { workspace = true }
+opuslink = { workspace = true }

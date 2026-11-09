@@ -75,23 +75,30 @@ def changed_mode_fields(fields: dict, config: dict) -> dict:
 
 
 class ModeRow(ctk.CTkFrame):
-    """One line: OFDM/MFSK/ROBUST segmented button + mode-specific menus."""
+    """One line: OFDM/MFSK/ROBUST segmented button + mode-specific menus.
 
-    def __init__(self, master, on_change=None, label: str = "Mode") -> None:
+    ``modem_types`` restricts the family choice (the Audio tab passes
+    ("OFDM",) — a single choice hides the segmented button entirely).
+    """
+
+    def __init__(self, master, on_change=None, label: str = "Mode",
+                 modem_types: tuple[str, ...] | None = None) -> None:
         super().__init__(master, fg_color="transparent")
         self.on_change = on_change
         self._loading = False
         self._wide = False  # live modem runs a wide OFDM family
+        self._types = tuple(modem_types) if modem_types else tuple(MODEM_TYPES)
 
         if label:
             ctk.CTkLabel(self, text=label, font=FONTS["small"],
                          text_color=FG_DIM).pack(side="left", padx=(0, 6))
         self.seg = ctk.CTkSegmentedButton(
-            self, values=list(MODEM_TYPES), width=180,
+            self, values=list(self._types), width=180,
             command=self._on_modem_type,
         )
-        self.seg.set(MODEM_TYPES[0])
-        self.seg.pack(side="left")
+        self.seg.set(self._types[0])
+        if len(self._types) > 1:
+            self.seg.pack(side="left")
 
         def menu(spec, width):
             box = ctk.CTkOptionMenu(
@@ -169,7 +176,9 @@ class ModeRow(ctk.CTkFrame):
         try:
             mtype = cfg.get("modem_type")
             if mtype is not None and 0 <= int(mtype) < len(MODEM_TYPES):
-                self.seg.set(MODEM_TYPES[int(mtype)])
+                name = MODEM_TYPES[int(mtype)]
+                if name in self._types:
+                    self.seg.set(name)
             for name, (box, spec) in self.controls.items():
                 if cfg.get(name) is None:
                     continue

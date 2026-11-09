@@ -67,6 +67,50 @@ class OutgoingSnapshot:
 
 
 @dataclass
+class AudioTxSnapshot:
+    """State of the outgoing live-audio broadcast."""
+
+    session: int
+    tier: str
+    bitrate: int
+    sample_rate: int
+    channels: int
+    duration_ms: int
+    frames_per_packet: int
+    period_s: float
+    started_at: float
+    packets_sent: int = 0
+    frames_dropped: int = 0
+    status: str = TX_PENDING
+    message: str = ""
+
+    def audio_seconds(self) -> float:
+        return self.packets_sent * self.frames_per_packet * self.duration_ms / 1000
+
+
+@dataclass
+class AudioSessionSnapshot:
+    """One received audio broadcast (per callsign + session id)."""
+
+    callsign: str
+    session: int
+    tier: str
+    bitrate: int
+    sample_rate: int
+    channels: int
+    duration_ms: int
+    last_seen: float
+    packets: int = 0
+    stale: int = 0
+    gap_packets: int = 0
+    plc_frames: int = 0
+    bad_frames: int = 0
+    playing: bool = False
+    primed: bool = False
+    buffer_ms: int = 0
+
+
+@dataclass
 class IncomingSnapshot:
     transfer_id: int
     sender: str
@@ -96,6 +140,8 @@ class AppState:
         self.kiss_connected = False
         self.outgoing: OutgoingSnapshot | None = None
         self.incoming: dict[int, IncomingSnapshot] = {}
+        self.audio: AudioTxSnapshot | None = None
+        self.audio_sessions: dict[tuple[str, int], AudioSessionSnapshot] = {}
         self.tx_frames_queued = 0
         self.last_history_seq = 0
 

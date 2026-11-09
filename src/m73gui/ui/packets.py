@@ -25,7 +25,7 @@ COLUMNS = [
     ("summary", "Summary", 400),
 ]
 
-TYPE_FILTERS = ["All", "Chat", "Files", "Control", "Raw"]
+TYPE_FILTERS = ["All", "Chat", "Files", "Audio", "Control", "Raw"]
 DIR_FILTERS = ["All", "RX", "TX"]
 
 
@@ -34,6 +34,8 @@ def _group(kind: str) -> str:
         return "Chat"
     if kind.startswith("file"):
         return "Files"
+    if kind == "audio":
+        return "Audio"
     if kind in ("control", "malformed"):
         return "Control"
     return "Raw"
@@ -257,7 +259,7 @@ class PacketsTab(ctk.CTkFrame):
 
 def describe_payload(payload: bytes) -> str:
     from .. import protocol
-    from ..constants import KIND_CHAT, KIND_FILE_BLOCK
+    from ..constants import KIND_AUDIO, KIND_CHAT, KIND_FILE_BLOCK
 
     try:
         env = protocol.decode_envelope(payload)
@@ -280,6 +282,15 @@ def describe_payload(payload: bytes) -> str:
             fec, total, block = protocol.decode_file_block(env)
             lines.append(
                 f"file_block {env.seq + 1}/{total}: fec=L{fec} {len(block)} B"
+            )
+        elif env.kind == KIND_AUDIO:
+            body = protocol.decode_audio(env)
+            ch = "stereo" if body.tier.channels == 2 else "mono"
+            lines.append(
+                f"audio from {body.callsign or '?'}: {body.tier.name} · "
+                f"{body.tier.sample_rate // 1000} kHz {ch} · "
+                f"{body.tier.bitrate // 1000} kbps · "
+                f"{body.frame_count} frames × {body.frame_bytes} B @ {body.duration_ms} ms"
             )
     except protocol.ProtocolError as exc:
         lines.append(f"malformed body: {exc}")

@@ -15,6 +15,8 @@ import secrets
 import struct
 from dataclasses import dataclass
 
+from opuslink import framing as oframing
+
 from .constants import (
     CHAT_FROM_MAX_LEN,
     FILE_NAME_MAX_BYTES,
@@ -22,6 +24,7 @@ from .constants import (
     KISS_OVERHEAD,
     KIND_CHAT,
     KIND_FILE_BLOCK,
+    KIND_AUDIO,
     M73G_MAGIC,
     M73G_VERSION,
     SAFE_FILE_EXTS,
@@ -233,7 +236,47 @@ def decode_file_block(env: Envelope) -> tuple[int, int, bytes]:
 
 
 # --------------------------------------------------------------------------
+# AUDIO: an opuslink body (settings | bitrate | frame_bytes | frame_count |
+# callsign | fixed-size CBR frames).
+#
+# The envelope transfer_id is the broadcast session id — a new session makes
+# receivers reset their decoder — and seq is a strictly increasing packet
+# counter used for gap/stale detection. Every packet is self-describing, so
+# any single frame bootstraps a receiver (same trick as file blocks).
+
+def encode_audio(
+    transfer_id: int, seq: int, tier, duration_ms: int, callsign: str,
+    frames,
+) -> bytes:
+    try:
+        body = oframing.pack_body(tier, duration_ms, callsign, frames)
+    except oframing.FramingError as exc:
+        raise ProtocolError(str(exc)) from None
+    return encode_envelope(KIND_AUDIO, transfer_id, seq, body)
+
+
+def decode_audio(env: Envelope) -> oframing.AudioBody:
+    """Return the parsed opuslink body of an AUDIO envelope."""
+    try:
+        return oframing.unpack_body(env.body)
+    except oframing.FramingError as exc:
+        raise ProtocolError(str(exc)) from None
+
+
+# --------------------------------------------------------------------------
 # Sizing / sanitization
+
+def audio_budget_for(payload_size: int, callsign_len: int) -> int:
+    """Opus-frame bytes available per audio packet (may go small; the
+    opuslink planner decides whether anything fits)."""
+    return (
+        payload_size
+        - KISS_OVERHEAD
+        - HEADER_LEN
+        - oframing.HEADER_LEN
+        - callsign_len
+    )
+
 
 def block_size_for(payload_size: int) -> int:
     """Usable rsfec block bytes per KISS frame: payload_size - 21."""

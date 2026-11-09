@@ -24,10 +24,12 @@ HEADER_LEN = 14  # magic(4) version(1) kind(1) transfer_id(4) seq(4)
 
 KIND_CHAT = 0x01
 KIND_FILE_BLOCK = 0x02  # rsfec-protected file block (fec | total | block)
+KIND_AUDIO = 0x03  # constant-bitrate opus audio burst (opuslink body)
 
 KIND_NAMES = {
     KIND_CHAT: "chat",
     KIND_FILE_BLOCK: "file-block",
+    KIND_AUDIO: "audio",
 }
 
 FILE_NAME_MAX_BYTES = 64
@@ -60,6 +62,17 @@ HISTORY_POLL_LIMIT = 100
 SPARKLINE_SAMPLES = 120  # 60 s at 500 ms
 
 DOWNLOAD_DIR_NAME = "m73gui"  # under ~/Downloads
+
+# --- Audio streaming ---
+# Backlog tolerance on BOTH sides: TX holds at most one packet's frames plus
+# this much extra; RX caps its jitter buffer at one packet's PCM plus this
+# much. Older audio is dropped (live stream — latency beats history).
+AUDIO_BUFFER_EXTRA_S = 2.0
+# Receiver retires a session after idle for max(this floor, 3x packet period).
+AUDIO_SESSION_IDLE_FLOOR_S = 15.0
+# Underrun concealment: at most this many PLC frames per dry episode, then
+# plain silence until the next packet re-primes the jitter buffer.
+AUDIO_PLC_MAX_FRAMES = 2
 
 # Extensions treated as ordinary text/media/document content; anything else
 # gets a caution when sending or receiving.

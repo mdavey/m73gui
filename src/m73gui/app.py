@@ -11,16 +11,19 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from . import protocol, userdirs
+from . import phytime, protocol, userdirs
 from .constants import (
     CHAT_PARTIAL_REVEAL_S,
     COL_WARN,
     EVENT_PUMP_INTERVAL_MS,
+    KIND_AUDIO,
     KIND_CHAT,
     KIND_FILE_BLOCK,
 )
 from .net.control import ControlClient, ControlError
 from .net.kiss import KissClient
+from .services.audio_rx import AudioReceiver
+from .services.audio_tx import AudioBroadcaster, audio_plan
 from .services.monitor import Monitor
 from .services.transfers import FileSender, IncomingFiles
 from .state import (
@@ -33,6 +36,7 @@ from .state import (
     PacketRow,
 )
 from .ui import theme
+from .ui.audio import AudioTab
 from .ui.channel import ChannelTab
 from .ui.chat import ChatTab
 from .ui.files import FilesTab
@@ -80,6 +84,24 @@ class App:
             accept_self=lambda: bool(self.files_tab.accept_self.get()),
         )
 
+        # live audio
+        self.audio_tx = AudioBroadcaster(
+            emit=lambda kind, **d: self.events.put((kind, d)),
+            send_frame=self._send_payload,
+            get_status=self._sender_status,
+            get_config=self._sender_config,
+            outgoing_ids=self.outgoing_ids,
+        )
+        # plain bool, not a tk variable: the audio callback thread reads it
+        # via speaker_enabled(), and Tcl calls from that thread deadlock
+        self._audio_speaker = bool(
+            self.gui_settings.get("audio_speaker", True)
+        )
+        self.audio_rx = AudioReceiver(
+            emit=lambda kind, **d: self.events.put((kind, d)),
+            speaker_enabled=lambda: self._audio_speaker,
+        )
+
         # rx metadata <-> payload correlation
         self._pending_meta: collections.deque[PacketRow] = collections.deque(maxlen=64)
         self._seen_seqs: set[int] = set()
@@ -100,6 +122,8 @@ class App:
             self.chat_tab.mode_row.set_from_config(stored["chat_mode"])
         if isinstance(stored.get("files_mode"), dict):
             self.files_tab.mode_row.set_from_config(stored["files_mode"])
+        if isinstance(stored.get("audio_mode"), dict):
+            self.audio_tab.mode_row.set_from_config(stored["audio_mode"])
 
         self.control.start()
         self.kiss.start()
@@ -124,6 +148,7 @@ class App:
         for cls, title, attr in [
             (ChatTab, "Chat", "chat_tab"),
             (FilesTab, "Files", "files_tab"),
+            (AudioTab, "Audio", "audio_tab"),
             (PacketsTab, "Packet Log", "packets_tab"),
             (ChannelTab, "Status", "channel_tab"),
             (SettingsTab, "Settings", "settings_tab"),
@@ -201,10 +226,12 @@ class App:
             self.notify("callsign not loaded yet (control offline?)", level="error")
             return
         fields = self.chat_tab.mode_row.fields()
-        if self.sender.busy():
+        if self.sender.busy() or self.audio_tx.busy():
             # applying mid-broadcast would resize frames under the stream
             if mode_differs(fields, self.state.config):
-                self.notify("mode change deferred: file transfer in progress",
+                what = ("file transfer" if self.sender.busy()
+                        else "audio broadcast")
+                self.notify(f"mode change deferred: {what} in progress",
                             level="warn")
             self._send_chat_frames(text)
             return
@@ -235,6 +262,8 @@ class App:
             return "KISS link is down; cannot transfer files"
         if not self.control.connected:
             return "control link is down; pacing and settings are unavailable"
+        if self.audio_tx.busy():
+            return "audio broadcast running; stop it before transferring"
         if not mode_fields:
             self._start_file(path, fec)
             return None
@@ -253,10 +282,50 @@ class App:
     def cancel_file(self) -> None:
         self.sender.cancel()
 
+    # ------------------------------------------------------------ live audio
+
+    def start_audio(self, mode_fields: dict) -> str | None:
+        """Begin a live broadcast: apply the pending OFDM mode first, then
+        run the capture/encode/send worker."""
+        if not self.kiss.connected:
+            return "KISS link is down; cannot broadcast audio"
+        if not self.control.connected:
+            return "control link is down; audio pacing needs live status"
+        if self.audio_tx.busy():
+            return "audio broadcast is already running"
+        if self.sender.busy():
+            return "file transfer in progress; stop it before broadcasting"
+        callsign = self.state.config.get("callsign") or ""
+        if not callsign:
+            return "callsign not loaded yet (control offline?)"
+        cfg = {**self.state.config, **mode_fields}
+        if audio_plan(cfg, payload_bytes=phytime.payload_bytes_for(cfg)) is None:
+            return "not enough data rate for audio on this modem mode"
+        self.apply_mode_then(
+            mode_fields, lambda applied: self._start_audio(applied, callsign)
+        )
+        return None
+
+    def _start_audio(self, cfg: dict, callsign: str) -> None:
+        err = self.audio_tx.start(cfg or self.state.config, callsign)
+        if err:
+            self.notify(err, level="error")
+
+    def stop_audio(self) -> None:
+        self.audio_tx.stop()
+
+    def set_audio_speaker(self, on: bool) -> None:
+        self._audio_speaker = bool(on)
+        self.persist_gui(audio_speaker=bool(on))
+
     def apply_settings(self, fields: dict) -> None:
         if self.sender.busy():
             self.notify("cannot change modem settings during a transfer",
                         level="warn")
+            return
+        if self.audio_tx.busy():
+            self.notify("cannot change modem settings during an audio "
+                        "broadcast", level="warn")
             return
 
         def work() -> tuple[str, bool]:
@@ -369,6 +438,8 @@ class App:
             stamp = time.strftime("%H:%M:%S")
             self.chat_tab.add_line(f"[{stamp}] {line}")
         self.incoming.sweep()
+        self.audio_rx.sweep()
+        self.audio_tab.prune_dead(self.audio_rx.sessions.keys())
         self._publish_stale_meta()
 
     def _dispatch(self, kind: str, data: dict) -> None:
@@ -384,6 +455,7 @@ class App:
             self.header.update(self.state)
             self.settings_tab.set_enabled(False)
             self.sender.notify_link_down()
+            self.audio_tx.notify_link_down()
             self.notify("control connection lost; reconnecting…", level="warn")
         elif kind == "kiss_connected":
             self.state.kiss_connected = True
@@ -395,6 +467,7 @@ class App:
             self.header.update(self.state)
             self.chat_tab.set_connected(False)
             self.sender.notify_link_down()
+            self.audio_tx.notify_link_down()
             self.notify("KISS connection lost; reconnecting…", level="warn")
         elif kind == "ctrl_event":
             self._on_ctrl_event(data["event"])
@@ -428,6 +501,17 @@ class App:
             elif snap.status == "failed":
                 self.notify(f"incoming {snap.sender}: {snap.message}",
                             level="warn")
+        elif kind == "audio_tx":
+            snap = data["snap"]
+            self.state.audio = snap
+            self.audio_tab.update_tx(snap)
+            if snap.status == TX_FAILED:
+                self.notify(f"audio broadcast failed: {snap.message}",
+                            level="error")
+        elif kind == "audio_rx":
+            snap = data["snap"]
+            self.state.audio_sessions[(snap.callsign, snap.session)] = snap
+            self.audio_tab.update_rx(snap)
         elif kind == "async_result":
             cb = data.get("cb")
             if cb:
@@ -469,9 +553,11 @@ class App:
         bw = cfg.get("bandwidth") or 0
         self.chat_tab.mode_row.set_live_bandwidth(bw)
         self.files_tab.mode_row.set_live_bandwidth(bw)
+        self.audio_tab.mode_row.set_live_bandwidth(bw)
         if not self._mode_adopted and cfg:
             self._adopt_mode_defaults(cfg)
         self.files_tab.on_live_config()
+        self.audio_tab.on_live_config()
 
     def _adopt_mode_defaults(self, cfg: dict) -> None:
         """First live config: a tab with no stored intent adopts the modem's
@@ -481,7 +567,8 @@ class App:
         if "modem_type" not in live:
             return
         for key, tab in (("chat_mode", self.chat_tab),
-                         ("files_mode", self.files_tab)):
+                         ("files_mode", self.files_tab),
+                         ("audio_mode", self.audio_tab)):
             if isinstance(self.gui_settings.get(key), dict):
                 continue
             self.persist_gui(**{key: live})
@@ -582,6 +669,16 @@ class App:
                     + (" (self)" if echo else ""),
                     True,
                 )
+            if env.kind == KIND_AUDIO:
+                body = protocol.decode_audio(env)
+                echo = env.transfer_id in self.outgoing_ids
+                return (
+                    "audio",
+                    f"opus {body.tier.name} {body.tier.bitrate // 1000} kbps · "
+                    f"{body.frame_count}×{body.frame_bytes} B #{env.seq}"
+                    + (" (self)" if echo else ""),
+                    True,
+                )
         except protocol.ProtocolError as exc:
             return "malformed", str(exc), False
         return "control", f"unknown M73G kind {env.kind:#02x}", False
@@ -600,6 +697,9 @@ class App:
         elif env.kind == KIND_FILE_BLOCK:
             fec, total, block = protocol.decode_file_block(env)
             self.incoming.handle_block(env, fec, total, block, sender=sender)
+        elif env.kind == KIND_AUDIO:
+            body = protocol.decode_audio(env)
+            self.audio_rx.handle_packet(env, body)
 
     # ------------------------------------------------------------- TX rows
 
@@ -634,6 +734,11 @@ class App:
             self.sender.notify_link_down()
         except Exception:
             pass
+        try:
+            self.audio_tx.close()
+        except Exception:
+            pass
+        self.audio_rx.close()
         self.incoming.close_all()
         self.control.close()
         self.kiss.close()
